@@ -1,0 +1,134 @@
+{
+  "projectType": "general",
+  "projectName": "Crossmint Agentic Finance",
+  "projectDescription": "Demos and starter code for building agentic finance apps with autonomous blockchain payments using Crossmint wallets",
+  "theme": "aspen",
+  "primaryColor": "#4F46E5",
+  "lightColor": "#818CF8",
+  "darkColor": "#3730A3",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "prerequisites"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/x402-protocol",
+              "concepts/a2a-payments",
+              "concepts/smart-wallets",
+              "concepts/payment-flow"
+            ]
+          },
+          {
+            "group": "HTTP Paywalls",
+            "pages": [
+              "paywalls/ping",
+              "paywalls/weather",
+              "paywalls/ping-crossmint",
+              "paywalls/solana"
+            ]
+          },
+          {
+            "group": "Agent-to-Agent",
+            "pages": [
+              "a2a/hello-eoa",
+              "a2a/hello-crossmint",
+              "a2a/send-tweet",
+              "a2a/events-concierge",
+              "a2a/cloudflare-agents"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/local-development",
+              "deployment/cloudflare",
+              "deployment/production"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "x402 SDK",
+            "pages": [
+              "api/x402-express",
+              "api/x402-hono",
+              "api/x402-fetch",
+              "api/x402-axios"
+            ]
+          },
+          {
+            "group": "Crossmint SDK",
+            "pages": [
+              "api/crossmint-wallets",
+              "api/crossmint-adapter"
+            ]
+          },
+          {
+            "group": "Payment Verification",
+            "pages": [
+              "api/eip-712-signatures",
+              "api/erc-6492-validation",
+              "api/facilitator"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Examples",
+        "groups": [
+          {
+            "group": "Production Examples",
+            "pages": [
+              "examples/worldstore-agent",
+              "examples/ad-agent",
+              "examples/event-rsvp"
+            ]
+          },
+          {
+            "group": "Tutorials",
+            "pages": [
+              "tutorials/build-paywall",
+              "tutorials/autonomous-agent",
+              "tutorials/durable-objects"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "HTTP 402 payment protocol (x402) for paywalled APIs",
+    "Agent-to-agent autonomous payments with smart wallets",
+    "Crossmint smart wallet integration (no private key management)",
+    "Cloudflare Durable Objects for stateful agent architecture",
+    "EIP-712 typed data signatures and ERC-6492 pre-deployment support",
+    "Multiple blockchain support (Base, Solana)",
+    "Production-ready MCP (Model Context Protocol) integration",
+    "Express, Hono, and Next.js middleware for payment validation"
+  ],
+  "publicApiSurface": [
+    "x402-express middleware",
+    "x402-hono middleware",
+    "x402-fetch client",
+    "x402-axios interceptor",
+    "CrossmintWalletService.from()",
+    "createViemAccountFromCrossmint()",
+    "McpServer.paidTool()",
+    "McpClient.withX402Client()",
+    "Host Agent Durable Object",
+    "Guest Agent Durable Object"
+  ]
+}
