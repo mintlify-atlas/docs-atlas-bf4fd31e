@@ -1,0 +1,440 @@
+---
+title: x402-axios
+description: Axios interceptor for automatic x402 payment handling
+---
+
+## Overview
+
+The `x402-axios` package provides an Axios interceptor that automatically handles the x402 payment protocol. When a server responds with `402 Payment Required`, the interceptor signs the payment and retries the request automatically.
+
+## Installation
+
+```bash
+npm install x402-axios axios
+```
+
+## Basic Usage
+
+```typescript
+import axios from 'axios';
+import { withPaymentInterceptor } from 'x402-axios';
+import { createX402Signer } from './x402Adapter';
+
+// Create a signer from your wallet
+const signer = createX402Signer(wallet);
+
+// Create axios instance
+const axiosInstance = axios.create({
+  baseURL: 'https://api.example.com'
+});
+
+// Add payment interceptor
+withPaymentInterceptor(axiosInstance, signer);
+
+// Use it like normal axios - payments are automatic
+const response = await axiosInstance.post('/tweet', {
+  text: 'Hello, world!'
+}, {
+  headers: { 'Accept': 'application/vnd.x402+json' }
+});
+
+console.log(response.data);
+```
+
+## API Reference
+
+### `withPaymentInterceptor(axiosInstance, signer)`
+
+Adds x402 payment handling to an Axios instance via request and response interceptors.
+
+#### Parameters
+
+- **`axiosInstance`** (`AxiosInstance`) - The Axios instance to add interceptors to
+- **`signer`** (`Signer`) - An x402-compatible signer for creating payment signatures
+
+#### Returns
+
+`void` - Modifies the axios instance in-place by adding interceptors
+
+#### Signer Interface
+
+The signer must implement:
+
+```typescript
+interface Signer {
+  account: { address: string };
+  chain: { id: number };
+  signTypedData(params: {
+    domain: any;
+    types: any;
+    primaryType: string;
+    message: any;
+  }): Promise<`0x${string}`>;
+}
+```
+
+## Examples
+
+### Next.js Client Application
+
+From the `send-tweet` demo ([source](https://github.com/Crossmint/crossmint-agentic-finance/blob/main/send-tweet/sendvia/app/page.tsx)):
+
+```typescript
+'use client';
+
+import { useState } from 'react';
+import axios from 'axios';
+import { withPaymentInterceptor } from 'x402-axios';
+import { CrossmintWallets, createCrossmint, EVMWallet } from "@crossmint/wallets-sdk";
+import { createX402Signer } from './x402Adapter';
+
+const SERVER_URL = 'http://localhost:3200';
+
+export default function SendTweet() {
+  const [wallet, setWallet] = useState<any>(null);
+  const [tweetText, setTweetText] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  // Create wallet
+  async function createAccount(email: string) {
+    const crossmint = createCrossmint({
+      apiKey: process.env.NEXT_PUBLIC_CROSSMINT_API_KEY
+    });
+    const wallets = CrossmintWallets.from(crossmint);
+
+    const cmWallet = await wallets.createWallet({
+      chain: 'base-sepolia',
+      signer: { type: 'api-key' },
+      owner: `email:${email}`
+    });
+
+    setWallet(cmWallet);
+    console.log('✅ Wallet created:', cmWallet.address);
+  }
+
+  // Send tweet with automatic payment
+  async function sendTweet() {
+    if (!wallet || !tweetText.trim()) return;
+
+    setLoading(true);
+
+    try {
+      console.log('🔐 Creating x402 signer from wallet');
+      const evmWallet = EVMWallet.from(wallet);
+      const signer = createX402Signer(wallet);
+
+      console.log('🔌 Setting up payment interceptor');
+      const axiosInstance = axios.create({ baseURL: SERVER_URL });
+
+      // Add custom logging interceptors
+      axiosInstance.interceptors.response.use(
+        (response) => response,
+        async (error) => {
+          if (error.response?.status === 402) {
+            console.log('💰 Received 402 Payment Required');
+            const paymentDetails = error.response.data.paymentDetails;
+            if (paymentDetails) {
+              const amountUSD = Number(paymentDetails.amount) / 1000000;
+              console.log(`  💵 Amount: $${amountUSD} USDC`);
+              console.log(`  🏦 Merchant: ${paymentDetails.merchant}`);
+              console.log(`  ⛓️ Network: ${paymentDetails.network}`);
+              console.log('  ✍️ Signing payment authorization...');
+            }
+          }
+          return Promise.reject(error);
+        }
+      );
+
+      // Add x402 payment interceptor
+      withPaymentInterceptor(axiosInstance, signer as any);
+
+      console.log('📤 Sending request to /tweet');
+      const response = await axiosInstance.post('/tweet', 
+        { text: tweetText.trim() },
+        { headers: { 'Accept': 'application/vnd.x402+json' } }
+      );
+
+      console.log('✅ Tweet posted successfully!');
+      console.log(`🐦 Tweet URL: ${response.data.tweetUrl}`);
+
+      setTweetText('');
+      alert('Tweet posted! Payment completed.');
+    } catch (error: any) {
+      console.error('❌ Error:', error);
+      if (error.response?.status === 402) {
+        alert('Payment failed. Check your wallet balance.');
+      } else {
+        alert('Failed to send tweet.');
+      }
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div>
+      <h1>Send Tweet</h1>
+      {!wallet ? (
+        <button onClick={() => createAccount('user@example.com')}>
+          Create Account
+        </button>
+      ) : (
+        <div>
+          <textarea
+            value={tweetText}
+            onChange={(e) => setTweetText(e.target.value)}
+            placeholder="What's happening?"
+          />
+          <button onClick={sendTweet} disabled={loading}>
+            {loading ? 'Sending...' : 'Send Tweet · $0.001'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+```
+
+### Creating x402-Compatible Signer
+
+From the Crossmint wallet adapter ([source](https://github.com/Crossmint/crossmint-agentic-finance/blob/main/send-tweet/sendvia/app/x402Adapter.ts)):
+
+```typescript
+import { EVMWallet, type Wallet } from "@crossmint/wallets-sdk";
+import type { Signer } from "x402/types";
+
+/**
+ * Convert a Crossmint wallet to an x402-compatible signer
+ * Handles ERC-6492 and EIP-1271 signature formats
+ */
+export function createX402Signer(wallet: Wallet<any>): Signer {
+  const evm = EVMWallet.from(wallet);
+
+  const signer: any = {
+    account: { address: evm.address },
+    chain: { id: 84532 }, // Base Sepolia
+    transport: {},
+
+    async signTypedData(params: any) {
+      const { domain, message, primaryType, types } = params;
+
+      console.log("🔐 Signing x402 payment data:", {
+        walletAddress: evm.address,
+        primaryType,
+        domain,
+        message
+      });
+
+      // Sign with Crossmint wallet
+      const sig = await evm.signTypedData({
+        domain,
+        message,
+        primaryType,
+        types,
+        chain: evm.chain as any
+      } as any);
+
+      console.log("📝 Raw signature from Crossmint:", {
+        signature: sig.signature,
+        length: sig.signature?.length
+      });
+
+      const processedSig = processSignature(sig.signature as string);
+
+      console.log("✅ Processed signature for x402:", {
+        signature: processedSig,
+        length: processedSig.length,
+        isERC6492: isERC6492Signature(processedSig)
+      });
+
+      return processedSig;
+    }
+  };
+
+  return signer as Signer;
+}
+
+/**
+ * Process and normalize signature formats for x402 compatibility
+ */
+function processSignature(rawSignature: string): `0x${string}` {
+  const signature = ensureHexPrefix(rawSignature);
+
+  console.log(`📝 Processing signature: ${signature.substring(0, 20)}... (${signature.length} chars)`);
+
+  // Handle ERC-6492 wrapped signatures (for pre-deployed wallets)
+  if (isERC6492Signature(signature)) {
+    console.log("✅ ERC-6492 signature detected - keeping for facilitator");
+    return signature;
+  }
+
+  // Handle EIP-1271 signatures (for deployed smart contract wallets)
+  if (signature.length === 174) {
+    console.log("✅ EIP-1271 signature detected");
+    return signature;
+  }
+
+  // Handle standard ECDSA signatures (65 bytes / 132 hex chars)
+  if (signature.length === 132) {
+    console.log("✅ Standard ECDSA signature (65 bytes)");
+    return signature;
+  }
+
+  // Handle non-standard lengths - extract standard signature
+  if (signature.length > 132) {
+    console.log(`⚠️ Non-standard signature length: ${signature.length} chars`);
+    const extracted = '0x' + signature.slice(-130);
+    console.log(`🔧 Extracted standard signature from longer format`);
+    return extracted as `0x${string}`;
+  }
+
+  console.log(`⚠️ Unusual signature length (${signature.length}), using as-is`);
+  return signature;
+}
+
+/**
+ * Ensure signature has 0x prefix
+ */
+function ensureHexPrefix(signature: string): `0x${string}` {
+  return (signature.startsWith('0x') ? signature : `0x${signature}`) as `0x${string}`;
+}
+
+/**
+ * Check if signature is ERC-6492 wrapped
+ */
+function isERC6492Signature(signature: string): boolean {
+  return signature.endsWith("6492649264926492649264926492649264926492649264926492649264926492");
+}
+```
+
+### Custom Request/Response Logging
+
+Add additional interceptors for debugging:
+
+```typescript
+import axios from 'axios';
+import { withPaymentInterceptor } from 'x402-axios';
+
+const axiosInstance = axios.create({ baseURL: 'http://localhost:3200' });
+
+// Log outgoing requests with payment headers
+axiosInstance.interceptors.request.use((config) => {
+  if (config.headers?.['X-PAYMENT']) {
+    console.log('🔄 Retrying request with payment signature');
+    const paymentHeader = String(config.headers['X-PAYMENT']);
+    console.log(`  📝 X-PAYMENT header: ${paymentHeader.substring(0, 60)}...`);
+  }
+  return config;
+});
+
+// Log incoming responses
+axiosInstance.interceptors.response.use(
+  (response) => {
+    const paymentResponse = response.headers['x-payment-response'];
+    if (paymentResponse) {
+      console.log('💳 Payment receipt received:', paymentResponse);
+    }
+    return response;
+  },
+  async (error) => {
+    if (error.response?.status === 402) {
+      console.log('💰 Payment required - interceptor will handle it');
+    }
+    return Promise.reject(error);
+  }
+);
+
+// Add payment interceptor (must be added after custom logging)
+withPaymentInterceptor(axiosInstance, signer);
+```
+
+## How It Works
+
+1. **Initial Request**: You make a request with axios
+2. **Intercept 402**: If server responds with `402 Payment Required`, the interceptor catches it
+3. **Parse Requirements**: Extract payment details from the 402 response body
+4. **Sign Payment**: Use the provided signer to create an EIP-712 signature
+5. **Retry with Payment**: Automatically retry the same request with `X-PAYMENT` header
+6. **Return Response**: Return the successful response to your code
+
+The entire payment flow is transparent - you use axios normally!
+
+## Payment Headers
+
+The interceptor automatically manages these headers:
+
+- **Request**: `Accept: application/vnd.x402+json` (you must add this manually)
+- **Retry**: `X-PAYMENT: <signature>` (added automatically by interceptor)
+- **Response**: `X-PAYMENT-RESPONSE: <receipt>` (payment confirmation from server)
+
+## Error Handling
+
+The interceptor preserves standard Axios error behavior:
+
+```typescript
+try {
+  const response = await axiosInstance.post('/tweet', { text: 'Hello' }, {
+    headers: { 'Accept': 'application/vnd.x402+json' }
+  });
+  
+  console.log('Success:', response.data);
+} catch (error: any) {
+  if (error.response?.status === 402) {
+    console.error('Payment failed - check wallet balance');
+  } else if (error.response?.status === 500) {
+    console.error('Server error:', error.response.data);
+  } else {
+    console.error('Network error:', error.message);
+  }
+}
+```
+
+Common errors:
+- **402 persists**: Signature verification failed or insufficient balance
+- **Network errors**: Standard axios network issues
+- **Signature errors**: Wallet not properly initialized
+
+## CORS Configuration
+
+When using with a CORS-enabled API, ensure the server exposes payment headers:
+
+```typescript
+// Server-side CORS configuration (Express example)
+app.use(cors({
+  origin: ['http://localhost:3000'],
+  credentials: true,
+  exposedHeaders: ['X-PAYMENT-RESPONSE'],
+}));
+```
+
+## TypeScript Types
+
+```typescript
+import type { AxiosInstance } from 'axios';
+import type { Signer } from "x402/types";
+
+function withPaymentInterceptor(
+  axiosInstance: AxiosInstance,
+  signer: Signer
+): void;
+```
+
+## Best Practices
+
+1. **Always add Accept header**: Include `Accept: application/vnd.x402+json` in requests to payment-protected endpoints
+2. **Check wallet deployment**: For smart wallets, verify deployment before making payments
+3. **Handle errors gracefully**: Check for 402 status in error handlers
+4. **Add custom logging**: Use additional interceptors for debugging payment flows
+5. **Test with testnet**: Use Base Sepolia testnet tokens for development
+
+## Related
+
+- [x402-fetch](/api/x402-fetch) - Fetch API wrapper for x402
+- [x402-express](/api/x402-express) - Server-side middleware for Express
+- [Crossmint Wallets](/api/crossmint-wallets) - Creating payment-enabled wallets
+
+## Source Code
+
+View complete examples:
+- [send-tweet demo](https://github.com/Crossmint/crossmint-agentic-finance/tree/main/send-tweet)
+- [ping-crossmint demo](https://github.com/Crossmint/crossmint-agentic-finance/tree/main/ping-crossmint)

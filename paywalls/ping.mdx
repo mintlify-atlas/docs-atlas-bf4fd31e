@@ -1,0 +1,314 @@
+---
+title: 'Ping Demo'
+description: 'Basic HTTP 402 paywall implementation with x402'
+---
+
+# Ping Demo
+
+The Ping demo is the most minimal implementation of an HTTP 402 paywall using the x402 protocol. It demonstrates how to protect a simple API endpoint with a payment requirement.
+
+## Overview
+
+This demo creates an Express server with a single protected endpoint `/ping` that requires a $0.001 USDC payment to access. Without payment, the server returns HTTP 402 Payment Required with payment details. With valid payment, it returns `{ "message": "pong" }`.
+
+**Key Features:**
+- Minimal Express TypeScript server
+- Single protected endpoint requiring USDC payment
+- Default network: `base-sepolia` (testnet)
+- Simple x402 payment middleware integration
+- Returns JSON or HTML paywall based on Accept header
+
+## Setup
+
+### Installation
+
+```bash
+cd ping
+cp .env.example .env
+# Edit PAY_TO to your EVM address
+npm install
+npm run dev
+```
+
+### Environment Variables
+
+Create a `.env` file with the following configuration:
+
+```bash .env
+PAY_TO=0xYourAddress
+PORT=3000
+PRIVATE_KEY=0xyour_private_key_for_payer
+TARGET_URL=http://localhost:3000/ping
+```
+
+**Configuration Options:**
+- `PAY_TO` - Your EVM wallet address to receive payments
+- `PORT` - Server port (default: 3000)
+- `PRIVATE_KEY` - Private key for the payer wallet (used by header generator)
+- `TARGET_URL` - URL of the protected endpoint
+
+## Server Implementation
+
+The server implementation is minimal, using the `x402-express` middleware:
+
+```typescript src/server.ts
+import express from "express";
+import { paymentMiddleware } from "x402-express";
+import * as dotenv from "dotenv";
+
+dotenv.config();
+
+const app = express();
+const port = process.env.PORT ? Number(process.env.PORT) : 3000;
+const payTo = process.env.PAY_TO || "0x0000000000000000000000000000000000000000";
+
+// Apply payment middleware
+app.use(paymentMiddleware(payTo, {
+  "GET /ping": { price: "$0.001", network: "base-sepolia" }
+}));
+
+// Protected endpoint
+app.get("/ping", (_req, res) => {
+  res.json({ message: "pong" });
+});
+
+app.listen(port, () => {
+  console.log(`basic-402 server listening on http://localhost:${port}`);
+});
+```
+
+## Usage
+
+### Access the Endpoint
+
+Open http://localhost:3000/ping in your browser or use curl:
+
+```bash
+curl -i http://localhost:3000/ping
+```
+
+Without payment, you'll receive either:
+- **JSON response** (with `Accept: application/json` header)
+- **HTML paywall page** (browser-like Accept header)
+
+### Request Without Payment (JSON)
+
+```bash
+curl -i -H "Accept: application/json" http://localhost:3000/ping
+```
+
+**Response (HTTP 402):**
+```json
+{
+  "accepts": [{
+    "payTo": "0xYourAddress",
+    "network": "base-sepolia",
+    "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+    "maxAmountRequired": "1000",
+    "extra": {
+      "name": "USDC",
+      "symbol": "USDC",
+      "decimals": 6
+    }
+  }],
+  "version": "2"
+}
+```
+
+### Request With Payment
+
+After generating an x402 payment header (see below), include it in your request:
+
+```bash
+curl -i -H 'X-PAYMENT: <BASE64_XPAYMENT>' http://localhost:3000/ping
+```
+
+**Success Response (HTTP 200):**
+```json
+{
+  "message": "pong"
+}
+```
+
+The response includes an `X-PAYMENT-RESPONSE` header confirming payment processing.
+
+## Generating Payment Headers
+
+The demo includes a script to generate X-PAYMENT headers for testing.
+
+### Configure Payer Credentials
+
+```bash
+cp .env.example .env
+# Set PRIVATE_KEY to the payer EVM private key (Base Sepolia recommended)
+# Set TARGET_URL if different from default
+```
+
+### Generate Header
+
+```bash
+npm run payment:header
+# Outputs a long Base64 string
+```
+
+### Use Header with curl
+
+```bash
+HEADER=$(npm run -s payment:header)
+curl -i -H "X-PAYMENT: $HEADER" $TARGET_URL
+```
+
+**How it Works:**
+1. Script fetches `/ping` to read `accepts` from the 402 JSON response
+2. Signs an `exact` EVM payment using `PRIVATE_KEY`
+3. Encodes the payment data as Base64
+4. Outputs the header value
+
+## Testing Tips
+
+### Pretty-Print 402 Response
+
+```bash
+curl -s -H "Accept: application/json" http://localhost:3000/ping | jq .
+```
+
+### View HTML Paywall
+
+```bash
+curl -i http://localhost:3000/ping
+```
+
+This returns an HTML page with payment instructions that users would see in a browser.
+
+### Test Multiple Requests
+
+Each payment can typically be used once due to nonce tracking. Generate a new header for each test request.
+
+## Payment Flow
+
+<Steps>
+  <Step title="Client Requests Endpoint">
+    Client makes GET request to `/ping` without payment header
+  </Step>
+  <Step title="Server Returns 402">
+    Server responds with HTTP 402 and payment requirements in JSON/HTML
+  </Step>
+  <Step title="Client Creates Payment">
+    Client signs EIP-712 payment authorization with required amount
+  </Step>
+  <Step title="Client Retries with Payment">
+    Client includes signed payment in `X-PAYMENT` header
+  </Step>
+  <Step title="Server Verifies Payment">
+    Middleware verifies signature and payment details
+  </Step>
+  <Step title="Server Returns Content">
+    If valid, server returns `{ "message": "pong" }`
+  </Step>
+</Steps>
+
+## Network Configuration
+
+The demo uses **Base Sepolia** testnet by default:
+
+- **Network:** `base-sepolia`
+- **USDC Contract:** `0x036CbD53842c5426634e7929541eC2318f3dCF7e`
+- **Price:** $0.001 USDC (1000 base units with 6 decimals)
+
+### Get Testnet Tokens
+
+**Base Sepolia ETH (for gas):**
+- Visit: https://www.alchemy.com/faucets/base-sepolia
+- Paste your wallet address
+- Request ETH
+
+**Base Sepolia USDC:**
+- Visit: https://faucet.circle.com/
+- Select "Base Sepolia" network
+- Paste your wallet address
+- Request USDC
+
+## Key Concepts
+
+### HTTP 402 Status Code
+
+HTTP 402 "Payment Required" was reserved for future use in the HTTP specification. The x402 protocol gives it a practical implementation for API monetization.
+
+### Content Negotiation
+
+The middleware respects the `Accept` header:
+- `Accept: application/json` → Returns 402 JSON with payment details
+- `Accept: text/html` → Returns HTML paywall page
+- `Accept: application/vnd.x402+json` → Returns x402-specific JSON format
+
+### Payment Schemes
+
+This demo uses the `exact` scheme, which requires:
+- Exact payment amount (no overpayment)
+- Specific recipient address
+- EIP-712 signature from payer
+- Single-use nonce for replay protection
+
+## Dependencies
+
+```json package.json
+{
+  "dependencies": {
+    "express": "^5.1.0",
+    "x402-express": "^0.6.1",
+    "x402": "^0.6.1",
+    "viem": "^2.37.6",
+    "axios": "^1.12.2",
+    "dotenv": "^17.2.2"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Weather Demo" icon="cloud" href="/paywalls/weather">
+    Learn how to protect dynamic API endpoints with query parameters
+  </Card>
+  <Card title="Ping Crossmint" icon="wallet" href="/paywalls/ping-crossmint">
+    Add smart wallet integration with UI
+  </Card>
+  <Card title="Solana Demo" icon="bolt" href="/paywalls/solana">
+    Implement paywalls on Solana blockchain
+  </Card>
+  <Card title="x402 Protocol" icon="book" href="https://x402.org">
+    Read the full x402 specification
+  </Card>
+</CardGroup>
+
+## Troubleshooting
+
+### Server won't start
+
+**Error:** `Error: listen EADDRINUSE`
+
+**Solution:** Port 3000 is already in use. Either kill the process or change the port:
+```bash
+PORT=3001 npm run dev
+```
+
+### Payment verification fails
+
+**Error:** `402 Payment Required` even with payment header
+
+**Solutions:**
+- Verify the signature was created for the correct network (base-sepolia)
+- Check that the payer wallet has sufficient USDC balance
+- Ensure the payment amount matches exactly ($0.001)
+- Generate a fresh payment header (nonces can't be reused)
+
+### USDC contract address not found
+
+**Error:** Asset address doesn't match expected USDC contract
+
+**Solution:** The middleware automatically looks up USDC for `base-sepolia`. If using a different network, update the network parameter in the middleware configuration.

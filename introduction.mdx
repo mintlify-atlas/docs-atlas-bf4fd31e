@@ -1,0 +1,103 @@
+---
+title: "Introduction"
+description: "Reference implementations showing AI agents making autonomous blockchain payments using Crossmint wallets"
+---
+
+## What is Crossmint Agentic Finance?
+
+Crossmint Agentic Finance provides reference implementations for AI agents to make autonomous blockchain payments. These examples demonstrate how agents can pay each other for services, access paywalled APIs, and conduct peer-to-peer transactions using USDC on EVM and Solana chains.
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="x402 Payment Protocol" icon="hand-holding-dollar">
+    HTTP paywalls using the 402 Payment Required status code for seamless payment integration
+  </Card>
+  
+  <Card title="Agent-to-Agent Payments" icon="users">
+    Autonomous agents communicating and transacting with each other using the A2A protocol
+  </Card>
+  
+  <Card title="Crossmint Smart Wallets" icon="wallet">
+    Gasless, programmable wallets with built-in USDC support for simplified payment flows
+  </Card>
+  
+  <Card title="Multi-Chain Support" icon="link">
+    Works on Base Sepolia testnet and Solana Devnet with production-ready patterns
+  </Card>
+</CardGroup>
+
+## Use Cases
+
+These reference implementations cover three primary scenarios:
+
+### HTTP Paywalls (x402)
+
+Minimal servers requiring USDC payment to access endpoints. Perfect for:
+- Paid API services
+- Premium content delivery
+- Metered usage billing
+
+**Start with:** [ping demo](/paywalls/ping) for pure backend or [ping-crossmint](/paywalls/ping-crossmint) for full-stack
+
+### Agent-to-Agent Payments (A2A)
+
+Autonomous agents paying each other for services and tool access:
+- AI agents purchasing capabilities from other agents
+- Automated service marketplaces
+- Tool access with payment verification
+
+**Start with:** [hello-eoa-a2a](/a2a/hello-eoa) for basics or [events-concierge](/a2a/events-concierge) for production patterns
+
+### Production Examples
+
+Real-world implementations with advanced features:
+- XMTP chat-based commerce
+- Autonomous ad bidding systems
+- Calendar booking with payments
+
+## Get Started
+
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Run your first x402 paywall in under 5 minutes
+  </Card>
+  
+  <Card title="Prerequisites" icon="list-check" href="/prerequisites">
+    Set up your development environment and get testnet tokens
+  </Card>
+  
+  <Card title="Core Concepts" icon="book" href="/concepts/x402-protocol">
+    Understand the x402 protocol and payment flows
+  </Card>
+  
+  <Card title="HTTP Paywalls" icon="server" href="/paywalls/ping">
+    Build your first payment-protected API endpoint
+  </Card>
+</CardGroup>
+
+<Note>
+  All examples use testnet tokens (Base Sepolia or Solana Devnet) and are safe to experiment with. Get free testnet USDC from the [Circle faucet](https://faucet.circle.com/).
+</Note>
+
+## Architecture Overview
+
+The reference implementations demonstrate:
+
+- **Payment Middleware**: Express and Hono middleware for automatic payment verification
+- **Client Libraries**: Axios and Fetch adapters for x402 payment headers
+- **Smart Wallets**: Crossmint SDK integration for gasless transactions
+- **Signature Standards**: EIP-712 signatures and ERC-6492 validation
+- **Production Patterns**: Cloudflare Workers, Durable Objects, and MCP integration
+
+## Community & Support
+
+<CardGroup cols={2}>
+  <Card title="GitHub Repository" icon="github" href="https://github.com/Crossmint/crossmint-agentic-finance">
+    View source code and contribute
+  </Card>
+  
+  <Card title="Get API Key" icon="key" href="https://www.crossmint.com/console">
+    Sign up for a Crossmint API key
+  </Card>
+</CardGroup>

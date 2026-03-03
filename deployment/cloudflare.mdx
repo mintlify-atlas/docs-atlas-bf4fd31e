@@ -1,0 +1,540 @@
+---
+title: Cloudflare Deployment
+description: Deploy AI agents to Cloudflare Workers and Durable Objects for production-grade stateful agents
+---
+
+## Overview
+
+Cloudflare Workers with Durable Objects provide the ideal infrastructure for autonomous AI agents:
+
+- **Stateful** - Maintain conversation state, MCP connections, and payment history
+- **Globally distributed** - Sub-50ms latency worldwide
+- **Auto-scaling** - Handle any traffic without configuration
+- **Single-threaded** - No race conditions or concurrency bugs
+- **Cost-effective** - Pay only for what you use
+
+## Why Durable Objects for AI Agents?
+
+Traditional serverless functions (AWS Lambda, regular Workers) are **stateless** - terrible for agents that need persistent state.
+
+### Comparison
+
+| Feature | Regular Workers | Durable Objects |
+|---------|----------------|------------------|
+| MCP connection state | ❌ Lost between requests | ✅ Persists in memory |
+| WebSocket support | ❌ No state | ✅ Built-in |
+| Coordination | ❌ Race conditions | ✅ Single-threaded |
+| Per-user isolation | ❌ Shared instance | ✅ Unique per ID |
+
+### Architecture Benefits
+
+Durable Objects are **"mini-servers per user"** that never have concurrency bugs:
+
+```
+User A → /mcp/users/hash-a → Host DO (name: "hash-a")
+                               ├─ wallet: 0xAAA...
+                               ├─ events: [...]
+                               └─ revenue: $12.50
+
+User B → /mcp/users/hash-b → Host DO (name: "hash-b")
+                               ├─ wallet: 0xBBB...
+                               ├─ events: [...]
+                               └─ revenue: $8.00
+```
+
+Each user gets their own isolated instance with persistent state.
+
+## Prerequisites
+
+<Steps>
+  <Step title="Cloudflare Account">
+    Sign up at [cloudflare.com](https://cloudflare.com) (free tier available)
+  </Step>
+  <Step title="Wrangler CLI">
+    ```bash
+    npm install -g wrangler
+    wrangler login
+    ```
+  </Step>
+  <Step title="API Keys">
+    - Crossmint API key from [Console](https://www.crossmint.com/console)
+    - OpenAI API key (for AI agents)
+  </Step>
+</Steps>
+
+## Deploy Events Concierge
+
+### Step 1: Create KV Namespace
+
+KV stores persistent data (user mappings, events, revenue):
+
+```bash
+cd events-concierge
+
+# Production KV
+npx wrangler kv:namespace create "SECRETS"
+
+# Preview KV (for staging)
+npx wrangler kv:namespace create "SECRETS" --preview
+```
+
+You'll see output like:
+```
+🌀 Creating namespace with title "events-concierge-SECRETS"
+✨ Success!
+Add the following to your wrangler.toml:
+[[kv_namespaces]]
+binding = "SECRETS"
+id = "abc123..."
+```
+
+### Step 2: Update wrangler.toml
+
+Add the namespace IDs to `wrangler.toml`:
+
+```toml wrangler.toml
+name = "events-concierge"
+main = "src/server.ts"
+compatibility_date = "2024-11-27"
+compatibility_flags = ["nodejs_compat"]
+
+[assets]
+binding = "ASSETS"
+directory = "./dist/client"
+
+[[kv_namespaces]]
+binding = "SECRETS"
+id = "abc123..."              # Production ID from step 1
+preview_id = "def456..."      # Preview ID from step 1
+
+[durable_objects]
+bindings = [
+  { class_name = "Host", name = "Host" },
+  { class_name = "Guest", name = "Guest" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Host", "Guest"]
+```
+
+### Step 3: Set Production Secrets
+
+Never commit API keys to `wrangler.toml`. Use Wrangler secrets:
+
+```bash
+# Set Crossmint API key
+npx wrangler secret put CROSSMINT_API_KEY
+# Paste your key when prompted: sk_...
+
+# Set OpenAI API key
+npx wrangler secret put OPENAI_API_KEY
+# Paste your key when prompted: sk-...
+```
+
+<Warning>
+  Secrets are encrypted and only accessible to your Worker at runtime. They never appear in logs or wrangler.toml.
+</Warning>
+
+### Step 4: Build and Deploy
+
+```bash
+# Build React frontend
+npm run build
+
+# Deploy to Cloudflare
+npm run deploy
+# or: npx wrangler deploy
+```
+
+Expected output:
+```
+⛅️ wrangler 4.42.0
+------------------
+Total Upload: 250.45 KiB / gzip: 75.32 KiB
+Uploaded events-concierge (2.34 sec)
+Published events-concierge (0.45 sec)
+  https://events-concierge.your-subdomain.workers.dev
+Current Deployment ID: abc-123-def-456
+```
+
+### Step 5: Verify Deployment
+
+```bash
+# Test the deployed Worker
+curl https://events-concierge.your-subdomain.workers.dev/
+
+# Check Durable Objects are working
+curl https://events-concierge.your-subdomain.workers.dev/agent
+```
+
+## Durable Objects Configuration
+
+### Defining Durable Objects
+
+In `wrangler.toml`:
+
+```toml
+[durable_objects]
+bindings = [
+  { class_name = "Host", name = "Host" },
+  { class_name = "Guest", name = "Guest" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Host", "Guest"]
+```
+
+**What this does:**
+- `class_name`: Must match exported class in your code
+- `name`: Binding name accessible via `env.HOST` and `env.GUEST`
+- `migrations`: Tells Cloudflare to create new DO classes
+
+### Exporting Durable Object Classes
+
+In `src/server.ts`:
+
+```typescript
+// Worker entry point
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const url = new URL(request.url);
+    
+    // Route to Guest Durable Object
+    if (url.pathname === "/agent") {
+      const guestDO = env.GUEST.get(env.GUEST.idFromName("default"));
+      return guestDO.fetch(request);
+    }
+    
+    // Route to Host Durable Object (per-user)
+    const match = url.pathname.match(/^\/mcp\/users\/([a-zA-Z0-9_-]+)$/);
+    if (match) {
+      const userId = match[1];
+      const hostDO = env.HOST.get(env.HOST.idFromName(userId));
+      return hostDO.fetch(request);
+    }
+    
+    return new Response("Not found", { status: 404 });
+  }
+};
+
+// Export Durable Object classes (REQUIRED)
+export { Host } from "./agents/host";
+export { Guest } from "./agents/guest";
+```
+
+<Info>
+  You **must** export Durable Object classes from the main entry point. Cloudflare uses these exports to instantiate DOs.
+</Info>
+
+### Creating Durable Object Instances
+
+```typescript
+// Get or create a DO with specific ID
+const userId = "user-abc-123";
+const id = env.HOST.idFromName(userId);  // Deterministic ID from name
+const stub = env.HOST.get(id);           // Get DO stub
+const response = await stub.fetch(request);  // Call DO's fetch()
+```
+
+**Key insight:** `idFromName()` ensures the same name always routes to the same DO instance globally.
+
+## Routing Patterns
+
+### Per-User Durable Objects
+
+Each user gets their own isolated DO:
+
+```typescript
+// Hash email to get URL-safe user ID
+const userId = await hashUserId(email);
+
+// Route: /mcp/users/{userId} → Host DO
+const hostDO = env.HOST.get(env.HOST.idFromName(userId));
+return hostDO.fetch(request);
+```
+
+### Shared Durable Object
+
+Single DO instance for all users (e.g., Guest agent):
+
+```typescript
+// Route: /agent → Single Guest DO
+const guestDO = env.GUEST.get(env.GUEST.idFromName("default"));
+return guestDO.fetch(request);
+```
+
+## KV Storage Patterns
+
+### Scoped Keys
+
+Scope KV keys by user ID to avoid conflicts:
+
+```typescript
+// Store event
+const key = `${userId}:events:${eventId}`;
+await env.SECRETS.put(key, JSON.stringify(event));
+
+// List all events for user
+const events = await env.SECRETS.list({ prefix: `${userId}:events:` });
+
+// Store revenue counter
+await env.SECRETS.put(`${userId}:revenue`, "50000");
+```
+
+### User Mappings
+
+```typescript
+// Email → user data
+await env.SECRETS.put(`users:email:${email}`, JSON.stringify({
+  userId,
+  walletAddress,
+  createdAt: Date.now()
+}));
+
+// User ID → user data
+await env.SECRETS.put(`users:id:${userId}`, JSON.stringify({
+  email,
+  walletAddress
+}));
+```
+
+## Monitoring and Debugging
+
+### Real-time Logs
+
+Stream logs from your deployed Worker:
+
+```bash
+npx wrangler tail
+
+# Filter by status code
+npx wrangler tail --status error
+
+# Filter by method
+npx wrangler tail --method POST
+```
+
+### Cloudflare Dashboard
+
+1. Go to [dash.cloudflare.com](https://dash.cloudflare.com)
+2. Navigate to **Workers & Pages**
+3. Click your Worker name
+4. View:
+   - Request metrics
+   - Error rates
+   - CPU time
+   - Durable Object usage
+
+### Debug Durable Objects
+
+Add logging in your DO classes:
+
+```typescript
+export class Host extends DurableObject {
+  async fetch(request: Request) {
+    console.log('[Host DO]', request.method, request.url);
+    console.log('[Host DO] ID:', this.ctx.id.toString());
+    
+    // Your code...
+  }
+}
+```
+
+View logs with `wrangler tail`.
+
+## Custom Domains
+
+### Add Custom Domain
+
+1. Go to Cloudflare Dashboard → **Workers & Pages**
+2. Select your Worker
+3. Click **Triggers** tab
+4. Click **Add Custom Domain**
+5. Enter domain (e.g., `agents.yourdomain.com`)
+6. Cloudflare automatically provisions SSL
+
+Alternatively, use `wrangler.toml`:
+
+```toml
+routes = [
+  { pattern = "agents.yourdomain.com/*", custom_domain = true }
+]
+```
+
+## Environment-Specific Configuration
+
+### Development vs Production
+
+Use different configurations per environment:
+
+```toml wrangler.toml
+name = "events-concierge"
+
+# Production KV
+[[kv_namespaces]]
+binding = "SECRETS"
+id = "prod-abc123"
+preview_id = "dev-def456"  # Used by wrangler dev
+
+# Production vars (committed to repo)
+[vars]
+ENVIRONMENT = "production"
+
+# Development vars (for wrangler dev)
+[env.dev.vars]
+ENVIRONMENT = "development"
+```
+
+### Deploy to Staging
+
+```bash
+# Deploy to staging environment
+npx wrangler deploy --env staging
+```
+
+Define in `wrangler.toml`:
+
+```toml
+[env.staging]
+name = "events-concierge-staging"
+route = "staging.yourdomain.com/*"
+
+[[env.staging.kv_namespaces]]
+binding = "SECRETS"
+id = "staging-xyz789"
+```
+
+## Limits and Quotas
+
+### Free Tier
+
+- **Workers**: 100,000 requests/day
+- **Durable Objects**: 1,000 requests/day
+- **KV**: 100,000 reads/day, 1,000 writes/day
+
+### Paid Plan ($5/month)
+
+- **Workers**: 10M requests/month included
+- **Durable Objects**: 1M requests/month included
+- **KV**: 10M reads/month, 1M writes/month
+
+<Tip>
+  Start with the free tier for development. Upgrade when deploying to production.
+</Tip>
+
+## Rollbacks
+
+Rollback to a previous deployment:
+
+```bash
+# List deployments
+npx wrangler deployments list
+
+# Rollback to specific deployment
+npx wrangler rollback <DEPLOYMENT_ID>
+```
+
+## CI/CD Integration
+
+### GitHub Actions
+
+Create `.github/workflows/deploy.yml`:
+
+```yaml
+name: Deploy to Cloudflare
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Build
+        run: npm run build
+      
+      - name: Deploy to Cloudflare
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+```
+
+### Setting Up API Token
+
+1. Go to [dash.cloudflare.com/profile/api-tokens](https://dash.cloudflare.com/profile/api-tokens)
+2. Click **Create Token**
+3. Use **Edit Cloudflare Workers** template
+4. Copy token and add to GitHub Secrets as `CLOUDFLARE_API_TOKEN`
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Deployment fails with 'namespace not found'">
+    Make sure KV namespace IDs in `wrangler.toml` match the ones created:
+    ```bash
+    npx wrangler kv:namespace list
+    ```
+    Update the `id` fields in `wrangler.toml`.
+  </Accordion>
+  
+  <Accordion title="Durable Object not found error">
+    Ensure:
+    1. DO classes are exported from main entry point
+    2. `class_name` in wrangler.toml matches export name
+    3. Migration is defined in wrangler.toml
+    
+    Try re-deploying:
+    ```bash
+    npx wrangler deploy --force
+    ```
+  </Accordion>
+  
+  <Accordion title="Secrets not accessible in Worker">
+    Verify secrets are set:
+    ```bash
+    npx wrangler secret list
+    ```
+    
+    Re-add if missing:
+    ```bash
+    npx wrangler secret put CROSSMINT_API_KEY
+    ```
+  </Accordion>
+  
+  <Accordion title="CORS errors from frontend">
+    Add CORS headers in Worker:
+    ```typescript
+    return new Response(body, {
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, X-Payment'
+      }
+    });
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Production Checklist" icon="list-check" href="./production">
+    Prepare for mainnet deployment with security best practices
+  </Card>
+  <Card title="Cloudflare Docs" icon="book" href="https://developers.cloudflare.com/workers/">
+    Deep dive into Cloudflare Workers and Durable Objects
+  </Card>
+</CardGroup>

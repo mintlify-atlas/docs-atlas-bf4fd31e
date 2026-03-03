@@ -1,0 +1,357 @@
+---
+title: Local Development
+description: Run Crossmint Agentic Finance demos locally and set up your development environment
+---
+
+## Overview
+
+All demos in Crossmint Agentic Finance can be run locally for development and testing. This guide covers setting up your local environment and running demos.
+
+## Prerequisites
+
+### Required Tools
+
+- **Node.js**: 18.17.0 or higher
+- **npm**: 9.0.0 or higher
+- **Git**: For cloning the repository
+
+### Required API Keys
+
+<Steps>
+  <Step title="Get Crossmint API Key">
+    1. Visit [Crossmint Console](https://www.crossmint.com/console)
+    2. Create a new Smart Wallet project
+    3. Navigate to API Keys section
+    4. Create an API key with scopes: `wallets.create`, `wallets.read`, `wallets:messages.sign`
+    5. Copy the key (starts with `sk_`)
+  </Step>
+  <Step title="Get OpenAI API Key (for AI agents)">
+    Visit [OpenAI Platform](https://platform.openai.com/api-keys) and create an API key
+  </Step>
+  <Step title="Get Testnet USDC">
+    For blockchain interactions, get test USDC from [Circle Faucet](https://faucet.circle.com/)
+    - Select **Base Sepolia** network
+    - Paste your wallet address
+    - Mint 1-10 USDC for testing
+  </Step>
+</Steps>
+
+## Quick Start: Simplest Demo
+
+The `ping` demo is the simplest way to understand the x402 payment flow:
+
+```bash
+# Clone repository
+git clone https://github.com/crossmint/crossmint-agentic-finance.git
+cd crossmint-agentic-finance
+
+# Run basic x402 paywall
+cd ping
+cp .env.example .env
+# Edit .env: Set PAY_TO to your address
+npm install
+npm run dev
+
+# Test in another terminal
+curl -i -H "Accept: application/json" http://localhost:3000/ping
+# Returns 402 Payment Required with payment details
+```
+
+## Running Events Concierge Demo
+
+The events concierge is the most complete demo with MCP, autonomous payments, and Cloudflare Durable Objects.
+
+### Step 1: Install Dependencies
+
+```bash
+cd events-concierge
+npm install
+```
+
+### Step 2: Configure Environment
+
+Create `.dev.vars` file with your API keys:
+
+```bash .dev.vars
+CROSSMINT_API_KEY=sk_your_api_key_here
+OPENAI_API_KEY=sk-your_openai_key_here
+```
+
+### Step 3: Run Development Server
+
+```bash
+npm run dev
+```
+
+This starts:
+- React UI at `http://localhost:5173`
+- Cloudflare Worker with Durable Objects
+- WebSocket server for agent communication
+
+### Step 4: Test the Payment Flow
+
+<Steps>
+  <Step title="Connect the agents">
+    - Open `http://localhost:5173`
+    - Click "Connect to Events" in the chat
+    - Guest agent establishes MCP connection to Host
+  </Step>
+  <Step title="Create an event (as host)">
+    - Go to `http://localhost:5173/?view=my-mcp`
+    - Sign in with email OTP
+    - Create an event with a price (e.g., $0.05)
+  </Step>
+  <Step title="Fund the guest wallet">
+    - Copy the Guest wallet address from chat
+    - Visit [Circle Faucet](https://faucet.circle.com/)
+    - Select "Base Sepolia" and paste address
+    - Mint 1 USDC
+  </Step>
+  <Step title="Watch autonomous payment">
+    Say: `rsvp to event <event-id>`
+    
+    The guest agent will:
+    1. Detect 402 response
+    2. Confirm payment with user
+    3. Sign and submit USDC transfer
+    4. Retry MCP call with payment proof
+    5. Display TX hash and confirmation
+  </Step>
+</Steps>
+
+## Running Other Demos
+
+### HTTP Paywalls
+
+**Ping (Express + x402)**
+```bash
+cd ping
+cp .env.example .env
+npm install
+npm run dev
+# Test: curl -i http://localhost:3000/ping
+```
+
+**Weather API**
+```bash
+cd weather
+cp .env.example .env
+npm install
+npm run dev
+# Test: curl http://localhost:3000/weather?city=London
+```
+
+**Ping with Crossmint UI**
+```bash
+cd ping-crossmint/server
+cp .env.example .env
+npm install
+npm run dev
+
+# In another terminal
+cd ping-crossmint/client
+npm install
+npm run dev
+# Open http://localhost:5173
+```
+
+### Agent-to-Agent Demos
+
+**Basic A2A with EOA Wallets**
+```bash
+cd hello-eoa-a2a
+cp .env.example .env
+# Edit .env with private keys
+npm install
+npm run dev
+```
+
+**Crossmint Wallets A2A**
+```bash
+cd hello-crossmint-wallets-a2a
+cp .env.example .env
+# Edit .env with CROSSMINT_API_KEY
+npm install
+npm run dev
+```
+
+## Development Workflow
+
+### File Structure (events-concierge)
+
+```
+events-concierge/
+├── src/
+│   ├── agents/
+│   │   ├── host.ts          # MCP server with paid tools
+│   │   └── guest.ts         # MCP client with auto-payment
+│   ├── shared/
+│   │   └── eventService.ts  # KV operations for events
+│   ├── utils/
+│   │   ├── cors.ts          # CORS headers for MCP
+│   │   └── hashing.ts       # User ID hashing
+│   ├── server.ts            # Cloudflare Worker entry
+│   ├── constants.ts         # Chain config, addresses
+│   └── x402Adapter.ts       # Crossmint → viem adapter
+├── wrangler.toml            # Durable Object bindings
+├── .dev.vars                # Local secrets (gitignored)
+└── package.json
+```
+
+### Testing Payment Verification
+
+```bash
+# Check wallet balances (Base Sepolia)
+cast balance <WALLET_ADDRESS> --rpc-url https://sepolia.base.org
+
+# Check USDC balance
+cast call 0x036CbD53842c5426634e7929541eC2318f3dCF7e \
+  "balanceOf(address)(uint256)" \
+  <WALLET_ADDRESS> \
+  --rpc-url https://sepolia.base.org
+
+# Get transaction details
+cast tx <TX_HASH> --rpc-url https://sepolia.base.org
+
+# Verify transaction receipt
+cast receipt <TX_HASH> --rpc-url https://sepolia.base.org
+```
+
+### Browser Console Testing
+
+```javascript
+// Connect to guest agent via WebSocket
+ws = new WebSocket("ws://localhost:5173/agent");
+ws.onmessage = (e) => console.log("Received:", JSON.parse(e.data));
+
+// Connect to host MCP server
+ws.send(JSON.stringify({
+  type: "connect",
+  hostUrl: "http://localhost:5173/mcp/users/<userId>"
+}));
+
+// Call free tool
+ws.send(JSON.stringify({
+  type: "call_tool",
+  tool: "listEvents",
+  args: {}
+}));
+
+// Call paid tool (triggers 402 flow)
+ws.send(JSON.stringify({
+  type: "call_tool",
+  tool: "rsvpToEvent",
+  args: { eventId: "<event-id>" }
+}));
+```
+
+## Network Configuration
+
+### Base Sepolia (Testnet - Default)
+
+```typescript
+// src/constants.ts
+export const USDC_BASE_SEPOLIA = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
+export const NETWORK = "base-sepolia";
+export const CHAIN_ID = 84532;
+```
+
+**Faucets:**
+- USDC: [Circle Faucet](https://faucet.circle.com/)
+- ETH: [Base Sepolia Faucet](https://www.alchemy.com/faucets/base-sepolia)
+
+**Explorer:**
+- [Base Sepolia Explorer](https://sepolia.basescan.org/)
+
+## Troubleshooting
+
+### "Cannot find module" Errors
+
+```bash
+# Clear node_modules and reinstall
+rm -rf node_modules package-lock.json
+npm install
+```
+
+### Port Already in Use
+
+```bash
+# Kill process on port 3000
+lsof -ti:3000 | xargs kill -9
+
+# Or change port in .env
+PORT=3001
+```
+
+### Wrangler Dev Issues
+
+```bash
+# Clear Wrangler cache
+rm -rf ~/.wrangler
+
+# Update Wrangler
+npm install -g wrangler@latest
+```
+
+### Payment Verification Failed
+
+<AccordionGroup>
+  <Accordion title="Check wallet has USDC">
+    ```bash
+    # Check USDC balance on Base Sepolia
+    cast call 0x036CbD53842c5426634e7929541eC2318f3dCF7e \
+      "balanceOf(address)(uint256)" \
+      <WALLET_ADDRESS> \
+      --rpc-url https://sepolia.base.org
+    ```
+  </Accordion>
+  <Accordion title="Verify network consistency">
+    Ensure all components use the same network:
+    - Guest agent: `base-sepolia`
+    - Host agent: `base-sepolia`
+    - USDC contract: `0x036CbD53842c5426634e7929541eC2318f3dCF7e`
+    - Chain ID: `84532`
+  </Accordion>
+  <Accordion title="Check facilitator is accessible">
+    ```bash
+    curl https://x402.org/facilitator/health
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### Durable Objects State Issues
+
+```bash
+# Wrangler doesn't persist DO state in dev mode
+# Restart the dev server to reset state
+Ctrl+C
+npm run dev
+```
+
+## Development Tips
+
+<Tip>
+  Use `wrangler tail` to stream logs from your Worker in real-time:
+  ```bash
+  npx wrangler tail
+  ```
+</Tip>
+
+<Warning>
+  `.dev.vars` contains secrets and is gitignored. Never commit API keys to version control.
+</Warning>
+
+<Info>
+  For Cloudflare Workers, local development uses `wrangler dev` which simulates the Cloudflare runtime. Some features may behave differently than in production.
+</Info>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Deploy to Cloudflare" icon="cloud" href="./cloudflare">
+    Deploy your agent to Cloudflare Workers and Durable Objects
+  </Card>
+  <Card title="Production Checklist" icon="list-check" href="./production">
+    Prepare your app for mainnet deployment
+  </Card>
+</CardGroup>

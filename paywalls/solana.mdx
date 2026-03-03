@@ -1,0 +1,540 @@
+---
+title: 'Solana USDC Demo'
+description: 'HTTP 402 paywall implementation on Solana with Crossmint integration'
+---
+
+# Solana USDC Demo
+
+The Solana demo shows how to implement HTTP 402 paywalls on Solana blockchain using the Faremeter middleware with Crossmint smart wallet integration. This demonstrates cross-chain compatibility of the x402 payment protocol.
+
+## Overview
+
+This demo implements a payment-protected endpoint on Solana, supporting both:
+- **Crossmint API Signer**: Server-side signing with Crossmint smart wallets
+- **Crossmint Delegated Wallet**: External private key signer to Crossmint smart wallet
+
+**Key Features:**
+- Solana blockchain payment settlement
+- USDC SPL token payments
+- Faremeter middleware for Solana x402 support
+- Crossmint wallet integration for Solana
+- Protected `/protected` endpoint requiring 0.01 USDC
+- Supports both devnet and mainnet-beta
+
+## Prerequisites
+
+### Development Tools
+- **Node.js 18+**
+- **Solana CLI tools** (for keypair generation)
+- **npm**
+
+### Crossmint Account
+
+1. Create account at https://www.crossmint.com/
+2. Generate **Server API Key** (`sk_staging_...`)
+3. Configure for Solana network support
+
+### Testnet Tokens (Devnet)
+
+**SOL for transaction fees:**
+- Visit: https://faucet.solana.com
+- Paste your Solana address
+- Request SOL
+
+**USDC for payments:**
+- Visit: https://faucet.circle.com/
+- Select "Solana Devnet"
+- Request USDC
+
+## Setup
+
+### Method 1: Crossmint API Signer
+
+#### 1. Generate Keypairs
+
+```bash
+mkdir keypairs
+
+# Generate payer keypair
+solana-keygen new --no-bip39-passphrase -o keypairs/payer.json
+
+# Generate payment recipient keypair
+solana-keygen new --no-bip39-passphrase -o keypairs/payto.json
+```
+
+#### 2. Configure Environment
+
+Create `.env` file:
+
+```bash .env
+# Keypair paths
+PAYTO_KEYPAIR_PATH=./keypairs/payto.json
+PAYER_KEYPAIR_PATH=./keypairs/payer.json
+
+# Solana Network: "devnet" or "mainnet-beta"
+NETWORK=devnet
+
+# Crossmint Configuration
+CROSSMINT_API_KEY=sk_staging_...
+CROSSMINT_WALLET=
+CROSSMINT_ENVIRONMENT=staging
+
+# Server Configuration
+PORT=3000
+
+# Solana RPC URL
+RPC_URL=https://solana-devnet.g.alchemy.com/v2/YOUR_API_KEY
+
+# Facilitator URL
+FACILITATOR_URL=https://facilitator.corbits.dev
+# Or run locally: http://localhost:4000
+```
+
+**Configuration Options:**
+- `PAYTO_KEYPAIR_PATH` - Recipient wallet keypair file
+- `PAYER_KEYPAIR_PATH` - Payer wallet keypair file
+- `NETWORK` - Solana cluster (devnet or mainnet-beta)
+- `CROSSMINT_API_KEY` - Your Crossmint server API key
+- `PORT` - Server listen port
+- `RPC_URL` - Solana RPC endpoint
+- `FACILITATOR_URL` - Faremeter facilitator endpoint
+
+#### 3. Fund Accounts
+
+Get the public keys:
+
+```bash
+# View payer address
+solana-keygen pubkey keypairs/payer.json
+
+# View payto address
+solana-keygen pubkey keypairs/payto.json
+```
+
+Fund both addresses with SOL and USDC using the faucets mentioned above.
+
+#### 4. Install and Build
+
+```bash
+npm install
+npm run build
+```
+
+#### 5. Start Server
+
+```bash
+npm run start:server
+```
+
+**Expected Output:**
+```
+Server starting on port 3000
+Network: devnet
+PayTo: 8xK...abc
+Facilitator URL: https://facilitator.corbits.dev
+```
+
+#### 6. Run Test Script
+
+```bash
+npm run start:test
+```
+
+This script:
+1. Attempts to access `/protected` without payment (gets 402)
+2. Creates payment authorization
+3. Retries with X-PAYMENT header
+4. Receives success response
+
+### Method 2: Crossmint Delegated Wallet
+
+Delegated wallets use an external private key as admin signer for a Crossmint smart wallet.
+
+#### 1. Generate Payer Keypair
+
+```bash
+mkdir keypairs
+solana-keygen new --no-bip39-passphrase -o keypairs/payer.json
+```
+
+#### 2. Fund Payer
+
+Ensure the payer has SOL and USDC on Solana devnet.
+
+#### 3. Create Delegated Wallet
+
+```bash
+npm run create:wallet
+```
+
+**Output:**
+```
+Creating Crossmint delegated wallet...
+✅ Wallet created!
+Address: 9xY...xyz
+Admin Signer: 8xK...abc (from payer.json)
+```
+
+Save the wallet address to your `.env`:
+
+```bash
+CROSSMINT_WALLET=9xY...xyz
+```
+
+#### 4. Check Wallet Configuration
+
+```bash
+npm run check:wallet
+```
+
+Verifies:
+- Wallet exists
+- Admin signer is configured
+- Balances (SOL and USDC)
+
+#### 5. Start Facilitator (Terminal 1)
+
+Clone and run Faremeter locally:
+
+```bash
+git clone https://github.com/faremeter/faremeter
+cd faremeter
+# Follow QUICKSTART.md
+npm install
+npm run dev
+```
+
+#### 6. Start Server (Terminal 2)
+
+```bash
+npm run start:server
+```
+
+#### 7. Run Delegated Wallet Test (Terminal 3)
+
+```bash
+npm run start:delegated
+```
+
+## Server Implementation
+
+The server uses Faremeter middleware for Solana x402 support:
+
+```typescript src/server.ts
+import express from "express";
+import { createMiddleware } from "@faremeter/middleware/express";
+import { x402Exact, type KnownCluster } from "@faremeter/info/solana";
+import { Keypair } from "@solana/web3.js";
+import fs from "fs";
+
+const { PAYTO_KEYPAIR_PATH, NETWORK, PORT, FACILITATOR_URL } = process.env;
+
+// Load payment recipient keypair
+const payToKeypair = Keypair.fromSecretKey(
+  Uint8Array.from(JSON.parse(fs.readFileSync(PAYTO_KEYPAIR_PATH, "utf-8")))
+);
+
+const network = (NETWORK || "mainnet-beta") as KnownCluster;
+const port = parseInt(PORT || "3000", 10);
+const payTo = payToKeypair.publicKey.toBase58();
+
+const app = express();
+const facilitatorURL = FACILITATOR_URL || "http://localhost:4000";
+
+// Protected endpoint with payment requirement
+app.get(
+  "/protected",
+  await createMiddleware({
+    facilitatorURL,
+    accepts: [
+      // USDC Exact Payment
+      x402Exact({
+        network,
+        asset: "USDC",
+        amount: "10000", // 0.01 USDC (6 decimals)
+        payTo,
+      }),
+    ],
+  }),
+  (_, res) => {
+    res.json({ msg: "success" });
+  }
+);
+
+app.listen(port);
+```
+
+### Payment Configuration
+
+The `x402Exact` function creates payment requirements:
+
+```typescript
+x402Exact({
+  network: "devnet",           // Solana cluster
+  asset: "USDC",               // SPL token name
+  amount: "10000",             // 0.01 USDC in base units
+  payTo: "8xK...abc",          // Recipient address
+})
+```
+
+### Alternative: Native SOL Payments
+
+You can also accept native SOL:
+
+```typescript
+import { xSolanaSettlement } from "@faremeter/info/solana";
+
+accepts: [
+  xSolanaSettlement({
+    network: "devnet",
+    asset: "sol",
+    amount: "1000000",  // 0.001 SOL (9 decimals)
+    payTo,
+  })
+]
+```
+
+## Usage
+
+### Request Without Payment
+
+```bash
+curl -H "Accept: application/vnd.x402+json" http://localhost:3000/protected
+```
+
+**Response (HTTP 402):**
+```json
+{
+  "accepts": [{
+    "payTo": "8xK...abc",
+    "network": "devnet",
+    "asset": "USDC",
+    "amount": "10000"
+  }],
+  "version": "2"
+}
+```
+
+### Request With Payment
+
+Generate and include payment authorization:
+
+```bash
+curl -H "X-PAYMENT: <base64-payment-data>" http://localhost:3000/protected
+```
+
+**Response (HTTP 200):**
+```json
+{
+  "msg": "success"
+}
+```
+
+## Crossmint Wallet Integration
+
+### API Signer
+
+Server-side signing with Crossmint:
+
+```typescript
+import { createCrossmint } from "@crossmint/wallets-sdk";
+
+const crossmint = createCrossmint({
+  apiKey: process.env.CROSSMINT_API_KEY,
+  environment: "staging"
+});
+
+const wallet = await crossmint.wallets.create({
+  chain: "solana-devnet",
+  type: "solana-custodial-wallet"
+});
+
+console.log("Wallet address:", wallet.address);
+```
+
+### Delegated Wallet
+
+External signer for Crossmint smart wallet:
+
+```typescript
+const adminKeypair = Keypair.fromSecretKey(/* your keypair */);
+
+const wallet = await crossmint.wallets.create({
+  chain: "solana-devnet",
+  type: "solana-mpc-wallet",
+  config: {
+    adminPublicKey: adminKeypair.publicKey.toBase58()
+  }
+});
+
+// Sign transactions with admin keypair
+const signature = await adminKeypair.sign(transactionData);
+```
+
+## Faremeter Facilitator
+
+Faremeter provides Solana-specific x402 middleware and facilitator services.
+
+### Running Facilitator Locally
+
+```bash
+git clone https://github.com/faremeter/faremeter
+cd faremeter
+npm install
+npm run dev
+```
+
+Facilitator runs on `http://localhost:4000` by default.
+
+### Using Hosted Facilitator
+
+For testing, use the public facilitator:
+
+```bash
+FACILITATOR_URL=https://facilitator.corbits.dev
+```
+
+**Note:** Production applications should run their own facilitator or use a trusted provider.
+
+## Payment Flow
+
+<Steps>
+  <Step title="Client Requests Endpoint">
+    Client makes GET request to `/protected` without payment
+  </Step>
+  <Step title="Server Returns 402">
+    Faremeter middleware returns payment requirements
+  </Step>
+  <Step title="Client Creates Payment">
+    Client signs Solana transaction for USDC transfer
+  </Step>
+  <Step title="Client Includes Payment">
+    X-PAYMENT header contains signed transaction data
+  </Step>
+  <Step title="Facilitator Validates">
+    Facilitator verifies signature and payment details
+  </Step>
+  <Step title="Settlement Executes">
+    USDC transferred on Solana blockchain
+  </Step>
+  <Step title="Server Returns Content">
+    Endpoint returns `{"msg":"success"}`
+  </Step>
+</Steps>
+
+## Network Configuration
+
+### Devnet (Testing)
+
+```bash
+NETWORK=devnet
+RPC_URL=https://api.devnet.solana.com
+```
+
+**Get Testnet Tokens:**
+- SOL: https://faucet.solana.com
+- USDC: https://faucet.circle.com/ (select Solana Devnet)
+
+### Mainnet (Production)
+
+```bash
+NETWORK=mainnet-beta
+RPC_URL=https://api.mainnet-beta.solana.com
+```
+
+**Use Real Funds:**
+- Purchase SOL from exchanges
+- Swap for USDC on Solana DEXs (Jupiter, Raydium)
+
+## Dependencies
+
+```json package.json
+{
+  "dependencies": {
+    "express": "latest",
+    "@faremeter/middleware": "latest",
+    "@faremeter/info": "latest",
+    "@solana/web3.js": "^1.87.0",
+    "@crossmint/wallets-sdk": "latest",
+    "dotenv": "^17.2.2"
+  }
+}
+```
+
+## Key Differences from EVM
+
+| Feature | EVM (Ethereum/Base) | Solana |
+|---------|---------------------|--------|
+| Middleware | x402-express | @faremeter/middleware |
+| Signature Type | EIP-712 typed data | Solana transaction |
+| Token Standard | ERC-20 | SPL Token |
+| Payment Asset | USDC (ERC-20) | USDC (SPL) |
+| Decimals | 6 (USDC) | 6 (USDC), 9 (SOL) |
+| Account Model | Smart contracts | Program accounts |
+| Facilitator | Coinbase x402 | Faremeter |
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Ping Demo" icon="circle-dot" href="/paywalls/ping">
+    Start with basic EVM implementation
+  </Card>
+  <Card title="Ping Crossmint" icon="wallet" href="/paywalls/ping-crossmint">
+    Learn Crossmint EVM integration
+  </Card>
+  <Card title="Faremeter Docs" icon="book" href="https://github.com/faremeter/faremeter">
+    Deep dive into Faremeter middleware
+  </Card>
+  <Card title="Solana Docs" icon="scroll" href="https://docs.solana.com">
+    Learn Solana development
+  </Card>
+</CardGroup>
+
+## Troubleshooting
+
+### Keypair Generation Fails
+
+**Error:** `solana-keygen: command not found`
+
+**Solution:** Install Solana CLI tools:
+```bash
+sh -c "$(curl -sSfL https://release.solana.com/stable/install)"
+```
+
+### Insufficient Funds
+
+**Error:** Transaction fails with "insufficient funds"
+
+**Solution:** 
+- Ensure payer has SOL for transaction fees (~0.001 SOL per transaction)
+- Ensure payer has USDC for payment amount (0.01 USDC for this demo)
+- Check balances: `solana balance <address>`
+
+### RPC Connection Failed
+
+**Error:** Cannot connect to Solana RPC
+
+**Solution:**
+- Verify RPC_URL is correct for your network
+- Use Alchemy/QuickNode for reliable RPC access
+- Check network status: https://status.solana.com
+
+### Facilitator Unreachable
+
+**Error:** Cannot connect to facilitator
+
+**Solution:**
+- Verify FACILITATOR_URL is accessible
+- If using local facilitator, ensure it's running
+- Check firewall/network settings
+- Try public facilitator: `https://facilitator.corbits.dev`
+
+### Crossmint Wallet Creation Fails
+
+**Error:** Invalid API key or wallet creation failed
+
+**Solution:**
+- Verify API key format (`sk_staging_...`)
+- Ensure Crossmint account has Solana enabled
+- Check network parameter matches (devnet vs mainnet)
+- Review Crossmint dashboard for account status

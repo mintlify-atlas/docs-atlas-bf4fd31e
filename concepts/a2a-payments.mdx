@@ -1,0 +1,565 @@
+---
+title: 'Agent-to-Agent Payments'
+description: 'Autonomous payment flows between AI agents using x402 and MCP'
+icon: 'arrows-turn-to-dots'
+---
+
+## Overview
+
+Agent-to-Agent (A2A) payments enable AI agents to autonomously pay each other for services and tool access. No user intervention required after initial approval—agents handle signature generation, payment submission, and settlement verification.
+
+**Key insight:** Agents treat payments like API authentication—just another HTTP header to include.
+
+## Why A2A Matters
+
+Traditional payment flows break agent autonomy:
+
+<CardGroup cols={2}>
+  <Card title="Manual Flows" icon="hand">
+    User must approve every transaction
+    
+    ❌ Breaks automation
+  </Card>
+  <Card title="Private Keys" icon="key">
+    Agents need direct key access
+    
+    ❌ Security nightmare
+  </Card>
+  <Card title="Custom Infrastructure" icon="server">
+    Build payment systems from scratch
+    
+    ❌ High development cost
+  </Card>
+  <Card title="User Intervention" icon="user">
+    Manual signing for each payment
+    
+    ❌ Poor UX
+  </Card>
+</CardGroup>
+
+**A2A payments solve this:**
+
+```
+User: "RSVP to event abc-123"
+  ↓
+Guest Agent: Detects paid tool, checks price ($0.05)
+  ↓
+Guest Agent: Signs USDC payment autonomously
+  ↓
+Host Agent: Verifies signature, settles on Base
+  ↓
+Guest Agent: "You're registered! TX: 0xabc...def"
+```
+
+Zero user intervention after initial confirmation.
+
+## A2A Architecture
+
+A2A payments combine three technologies:
+
+### 1. x402 Protocol (Payment Layer)
+
+HTTP-native payment protocol using `402 Payment Required` status codes.
+
+```typescript
+// Server returns payment requirement
+HTTP/1.1 402 Payment Required
+{
+  "payment": {
+    "amount": "50000",  // 0.05 USDC
+    "currency": "USDC",
+    "to": "0xHostWallet",
+    "chainId": 84532
+  }
+}
+```
+
+See [x402 Protocol](/concepts/x402-protocol) for details.
+
+### 2. MCP (Tool Layer)
+
+Model Context Protocol defines how agents call tools and functions.
+
+```typescript
+// Define a paid tool
+server.paidTool(
+  "rsvpToEvent",
+  "RSVP to a paid event",
+  0.05,  // Price in USD
+  { eventId: z.string() },
+  async ({ eventId }) => {
+    // Business logic
+    return { success: true, eventId };
+  }
+);
+```
+
+See [events-concierge/src/agents/host.ts:158-202](https://github.com/crossmint/crossmint-agentic-finance/blob/main/events-concierge/src/agents/host.ts#L158-L202)
+
+### 3. Smart Wallets (Identity Layer)
+
+Crossmint smart wallets enable signing without private key management.
+
+```typescript
+// Create wallet from API key
+const wallet = await crossmintWallets.createWallet({
+  chain: "base-sepolia",
+  signer: { type: "api-key" }
+});
+
+// Sign payment
+const signature = await wallet.signTypedData(paymentMessage);
+```
+
+See [Smart Wallets](/concepts/smart-wallets) for details.
+
+## Payment Flow
+
+Let's walk through a complete A2A payment:
+
+<Steps>
+  <Step title="User Initiates Action">
+    User asks their agent to perform a paid action
+    
+    ```
+    User: "RSVP to event abc-123"
+    ```
+  </Step>
+  
+  <Step title="Guest Agent Calls Paid Tool">
+    Agent makes MCP tool call to Host
+    
+    ```typescript
+    await mcpClient.callTool("rsvpToEvent", {
+      eventId: "abc-123",
+      walletAddress: guestWallet.address
+    });
+    ```
+  </Step>
+  
+  <Step title="Host Returns 402 Payment Required">
+    Host MCP server detects missing payment, returns requirement
+    
+    ```json
+    {
+      "statusCode": 402,
+      "payment": {
+        "amount": "50000",
+        "currency": "USDC",
+        "to": "0xHostWallet",
+        "chainId": 84532
+      }
+    }
+    ```
+  </Step>
+  
+  <Step title="Guest Agent Confirms with User">
+    Agent shows payment details, gets approval
+    
+    ```typescript
+    const approved = await askUser(
+      `Pay ${requirement.amount} USDC to RSVP?`
+    );
+    if (!approved) throw new Error("Payment declined");
+    ```
+  </Step>
+  
+  <Step title="Guest Agent Signs Payment">
+    Agent creates EIP-712 signature
+    
+    ```typescript
+    const signature = await guestWallet.signTypedData({
+      domain: { chainId: 84532, ... },
+      types: { Payment: [...] },
+      message: {
+        amount: "50000",
+        to: "0xHostWallet",
+        currency: "0xUSDC",
+        nonce: Date.now()
+      }
+    });
+    ```
+  </Step>
+  
+  <Step title="Guest Agent Retries with Payment">
+    Agent retries MCP call with X-PAYMENT header
+    
+    ```typescript
+    await mcpClient.callTool("rsvpToEvent", args, {
+      headers: { "X-PAYMENT": signature }
+    });
+    ```
+  </Step>
+  
+  <Step title="Host Verifies & Settles">
+    Host verifies signature and settles payment on-chain
+    
+    ```typescript
+    // Verify signature
+    const valid = await x402.verifySignature(signature, message);
+    
+    // Settle on Base Sepolia
+    const tx = await facilitator.settle(signature);
+    
+    // Execute business logic
+    await recordRsvp(eventId, guestWallet);
+    ```
+  </Step>
+  
+  <Step title="Host Returns Success + TX Hash">
+    Host returns tool result with transaction proof
+    
+    ```json
+    {
+      "success": true,
+      "eventId": "abc-123",
+      "transactionHash": "0xabc...def",
+      "message": "RSVP confirmed!"
+    }
+    ```
+  </Step>
+  
+  <Step title="Guest Agent Confirms to User">
+    Agent displays confirmation with blockchain proof
+    
+    ```
+    Agent: "You're registered for 'Tech Meetup'!"
+    Agent: "Transaction: 0xabc...def"
+    Agent: "View on explorer: https://sepolia.basescan.org/tx/0xabc...def"
+    ```
+  </Step>
+</Steps>
+
+## Code Example: Guest Agent
+
+Here's how the Guest Agent handles automatic payments:
+
+```typescript events-concierge/src/agents/guest.ts
+export class Guest extends McpAgent {
+  private wallet: Wallet;
+  private mcpClient: McpClient;
+
+  async init() {
+    // Create guest wallet
+    this.wallet = await crossmintWallets.createWallet({
+      chain: "base-sepolia",
+      signer: { type: "api-key" }
+    });
+
+    // Setup MCP client with x402 auto-payment
+    this.mcpClient = new McpClient({ url: hostMcpUrl })
+      .withX402Client({
+        wallet: this.wallet,
+        onPaymentRequired: async (requirement, retryFn) => {
+          // 1. Show payment modal to user
+          const approved = await this.confirmPayment(requirement);
+          if (!approved) throw new Error("Payment declined");
+
+          // 2. Sign payment
+          const signature = await this.wallet.signPayment(requirement);
+
+          // 3. Retry with signature
+          return retryFn(signature);
+        }
+      });
+  }
+
+  async rsvpToEvent(eventId: string) {
+    // This automatically handles 402 responses!
+    return this.mcpClient.callTool("rsvpToEvent", {
+      eventId,
+      walletAddress: this.wallet.address
+    });
+  }
+}
+```
+
+See [events-concierge/src/agents/guest.ts](https://github.com/crossmint/crossmint-agentic-finance/blob/main/events-concierge/src/agents/guest.ts)
+
+## Code Example: Host Agent
+
+Here's how the Host Agent defines paid tools:
+
+```typescript events-concierge/src/agents/host.ts
+export class Host extends McpAgent {
+  private wallet: Wallet;
+  private server: McpServer;
+
+  async init() {
+    // Create host wallet for receiving payments
+    this.wallet = await crossmintWallets.createWallet({
+      chain: "base-sepolia",
+      signer: { type: "api-key" }
+    });
+
+    // Setup MCP server with x402 support
+    this.server = new McpServer({ name: "Event RSVP" })
+      .withX402({
+        network: "base-sepolia",
+        recipient: this.wallet.address,
+        facilitator: { url: FACILITATOR_URL }
+      });
+
+    // Register paid tool
+    this.server.paidTool(
+      "rsvpToEvent",
+      "RSVP to an event (requires payment)",
+      0.05,  // Price in USD
+      { eventId: z.string(), walletAddress: z.string() },
+      async ({ eventId, walletAddress }) => {
+        // This only executes AFTER payment is verified!
+        const event = await getEvent(eventId);
+        await recordRsvp(eventId, walletAddress);
+
+        return {
+          success: true,
+          eventId,
+          eventTitle: event.title,
+          message: `RSVP successful! Paid ${event.price} USDC.`
+        };
+      }
+    );
+  }
+}
+```
+
+See [events-concierge/src/agents/host.ts:158-202](https://github.com/crossmint/crossmint-agentic-finance/blob/main/events-concierge/src/agents/host.ts#L158-L202)
+
+## Multi-Tenant Architecture
+
+For production A2A systems, use Cloudflare Durable Objects for per-user isolation:
+
+```typescript
+// Each user gets their own Host instance
+User A → /mcp/users/hash-a → Host DO (name: "hash-a")
+                               ├─ wallet: 0xAAA...
+                               ├─ events: [...]
+                               └─ revenue: $12.50
+
+User B → /mcp/users/hash-b → Host DO (name: "hash-b")
+                               ├─ wallet: 0xBBB...
+                               ├─ events: [...]
+                               └─ revenue: $8.00
+```
+
+**Benefits:**
+
+<CardGroup cols={2}>
+  <Card title="Stateful" icon="database">
+    In-memory state persists across requests
+  </Card>
+  <Card title="Isolated" icon="shield">
+    Each user has their own wallet and data
+  </Card>
+  <Card title="Single-threaded" icon="microchip">
+    No race conditions or concurrency bugs
+  </Card>
+  <Card title="Auto-scaling" icon="up-right-and-down-left-from-center">
+    Created on-demand, hibernate when idle
+  </Card>
+</CardGroup>
+
+See [events-concierge/README.md](https://github.com/crossmint/crossmint-agentic-finance/blob/main/events-concierge/README.md) for full implementation.
+
+## Security Considerations
+
+<AccordionGroup>
+  <Accordion title="Signature Verification" icon="signature">
+    Always verify signatures match the payment message:
+    
+    ```typescript
+    const valid = await verifySignature({
+      signature,
+      message: paymentRequirement,
+      signer: guestWalletAddress
+    });
+    
+    if (!valid) throw new Error("Invalid signature");
+    ```
+  </Accordion>
+  
+  <Accordion title="Nonce Management" icon="hashtag">
+    Use nonces to prevent replay attacks:
+    
+    ```typescript
+    const message = {
+      amount: "50000",
+      to: hostWallet,
+      currency: USDC_ADDRESS,
+      nonce: Date.now()  // or UUID
+    };
+    
+    // Store used nonces
+    await kv.put(`nonce:${nonce}`, "used");
+    ```
+  </Accordion>
+  
+  <Accordion title="Balance Checking" icon="wallet">
+    Verify payer has sufficient funds before executing business logic:
+    
+    ```typescript
+    const balance = await getUSDCBalance(guestWallet);
+    if (balance < requirement.amount) {
+      throw new Error("Insufficient USDC balance");
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="Transaction Verification" icon="receipt">
+    Confirm on-chain settlement before marking payment complete:
+    
+    ```typescript
+    const tx = await publicClient.getTransaction({
+      hash: txHash
+    });
+    
+    if (tx.status !== "success") {
+      throw new Error("Transaction failed");
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="Rate Limiting" icon="gauge">
+    Prevent abuse with rate limits:
+    
+    ```typescript
+    const attempts = await kv.get(`ratelimit:${walletAddress}`);
+    if (attempts > 10) {
+      throw new Error("Rate limit exceeded");
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Error Handling
+
+Agents must gracefully handle payment failures:
+
+```typescript
+try {
+  const result = await mcpClient.callTool("rsvpToEvent", args);
+  console.log("✅ RSVP successful:", result);
+} catch (error) {
+  if (error.code === 402) {
+    // Payment required but user declined
+    console.log("⚠️ Payment required but not approved");
+  } else if (error.message.includes("Insufficient")) {
+    // Insufficient USDC balance
+    console.log("❌ Please add USDC to your wallet");
+  } else if (error.message.includes("signature")) {
+    // Invalid signature
+    console.log("❌ Signature verification failed");
+  } else {
+    // Other error
+    console.log("❌ RSVP failed:", error.message);
+  }
+}
+```
+
+## Real-World Examples
+
+<CardGroup cols={2}>
+  <Card title="Event RSVP" icon="calendar" href="https://github.com/crossmint/crossmint-agentic-finance/tree/main/events-concierge">
+    MCP-based event booking with autonomous payments
+    
+    **Stack:** Cloudflare Durable Objects, MCP, x402
+  </Card>
+  <Card title="Tweet Agent" icon="twitter" href="https://github.com/crossmint/crossmint-agentic-finance/tree/main/send-tweet">
+    Pay to post tweets via AI agent
+    
+    **Stack:** Next.js, Express, x402
+  </Card>
+  <Card title="Worldstore Agent" icon="shopping-cart" href="https://github.com/crossmint/worldstore-agent">
+    Amazon purchases via XMTP chat with gasless USDC
+    
+    **Stack:** XMTP, Base, Crossmint
+  </Card>
+  <Card title="Ad Bidding" icon="rectangle-ad" href="https://github.com/Must-be-Ash/x402-ad-agent">
+    Claude agents competing for ad space with payments
+    
+    **Stack:** Claude, x402, autonomous bidding
+  </Card>
+</CardGroup>
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Start with Testnet" icon="flask">
+    Use Base Sepolia and Circle's USDC faucet for development:
+    
+    - Network: `base-sepolia`
+    - Chain ID: `84532`
+    - USDC: `0x036CbD53842c5426634e7929541eC2318f3dCF7e`
+    - Faucet: [https://faucet.circle.com/](https://faucet.circle.com/)
+  </Accordion>
+  
+  <Accordion title="Confirm Before Payment" icon="user">
+    Always get user approval before signing payments:
+    
+    ```typescript
+    const approved = await showPaymentModal({
+      amount: "0.05 USDC",
+      recipient: "Event Host",
+      action: "RSVP to Tech Meetup"
+    });
+    ```
+  </Accordion>
+  
+  <Accordion title="Display Transaction Proofs" icon="receipt">
+    Show users blockchain proof of payment:
+    
+    ```typescript
+    console.log(`✅ Payment confirmed!`);
+    console.log(`TX: ${txHash}`);
+    console.log(`Explorer: https://sepolia.basescan.org/tx/${txHash}`);
+    ```
+  </Accordion>
+  
+  <Accordion title="Log Payment Events" icon="clipboard">
+    Track all payment attempts for debugging:
+    
+    ```typescript
+    await logPayment({
+      timestamp: Date.now(),
+      from: guestWallet,
+      to: hostWallet,
+      amount: "50000",
+      txHash,
+      status: "success"
+    });
+    ```
+  </Accordion>
+  
+  <Accordion title="Monitor Revenue" icon="chart-line">
+    Track earnings in real-time:
+    
+    ```typescript
+    const revenue = await kv.get(`${userId}:revenue`);
+    console.log(`Total revenue: $${revenue / 1000000}`);
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="x402 Protocol" icon="credit-card" href="/concepts/x402-protocol">
+    Deep dive into HTTP payment protocol
+  </Card>
+  <Card title="Smart Wallets" icon="wallet" href="/concepts/smart-wallets">
+    Learn about Crossmint smart wallet features
+  </Card>
+  <Card title="Payment Flow" icon="diagram-project" href="/concepts/payment-flow">
+    See detailed payment flow diagrams
+  </Card>
+  <Card title="Build Event RSVP" icon="rocket" href="/quickstart">
+    Build your first A2A payment system
+  </Card>
+</CardGroup>
+
+## Resources
+
+- [Model Context Protocol](https://modelcontextprotocol.io)
+- [Cloudflare Durable Objects](https://developers.cloudflare.com/durable-objects/)
+- [Cloudflare Agents SDK](https://developers.cloudflare.com/agents/)
+- [EIP-712: Typed Structured Data](https://eips.ethereum.org/EIPS/eip-712)

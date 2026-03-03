@@ -1,0 +1,817 @@
+---
+title: "Stateful Agents with Durable Objects"
+description: "Build production-grade multi-tenant agent systems using Cloudflare Durable Objects"
+---
+
+# Stateful Agents with Durable Objects
+
+Learn how to build scalable, multi-tenant AI agent systems using Cloudflare Durable Objects—the secret to maintaining state, eliminating race conditions, and achieving true per-user isolation.
+
+<Info>
+  **Time to complete**: 45-60 minutes
+  
+  **What you'll build**: A multi-tenant MCP server where each user gets their own stateful agent instance with isolated wallet and data
+</Info>
+
+## Why Durable Objects?
+
+Traditional serverless functions (AWS Lambda, Cloudflare Workers) are **stateless**. Every request is independent, making them perfect for simple APIs but terrible for agents that need:
+
+- **Persistent connections** (WebSockets, Server-Sent Events)
+- **Conversation history** across multiple requests
+- **Payment state** tracking (pending, confirmed, settled)
+- **Per-user isolation** without database queries
+
+<CardGroup cols={2}>
+  <Card title="Regular Workers" icon="xmark">
+    ❌ Lost state between requests
+    
+    ❌ Race conditions with concurrent requests
+    
+    ❌ No WebSocket support
+    
+    ❌ Shared instances across users
+  </Card>
+  <Card title="Durable Objects" icon="check">
+    ✅ In-memory state persists
+    
+    ✅ Single-threaded (no races)
+    
+    ✅ Built-in WebSocket support
+    
+    ✅ Unique instance per user ID
+  </Card>
+</CardGroup>
+
+## Core Concepts
+
+### What is a Durable Object?
+
+A Durable Object is a **stateful mini-server** that:
+
+1. **Lives in one datacenter** (close to users for low latency)
+2. **Processes requests serially** (no concurrency bugs)
+3. **Maintains in-memory state** (across requests)
+4. **Hibernates when idle** (no cost when not in use)
+5. **Is globally unique** by ID (same ID → same instance worldwide)
+
+```typescript
+// Traditional Worker (stateless)
+export default {
+  async fetch(request: Request) {
+    // No state between requests!
+    return new Response("Hello");
+  }
+};
+
+// Durable Object (stateful)
+export class Agent extends DurableObject {
+  private conversationHistory: Message[] = [];
+  private wallet: Wallet;
+  
+  constructor(state: DurableObjectState, env: Env) {
+    super(state, env);
+    // Initialize ONCE, persists across requests
+    this.wallet = createWallet();
+  }
+  
+  async fetch(request: Request) {
+    // State persists!
+    this.conversationHistory.push(...);
+    return new Response("Hello from " + this.wallet.address);
+  }
+}
+```
+
+### Per-User Isolation
+
+Each user gets their own DO instance:
+
+```typescript
+// Gateway Worker routes to user-specific DO
+export default {
+  async fetch(request: Request, env: Env) {
+    const userId = getUserId(request);
+    
+    // Get or create DO for this user
+    const doId = env.AGENT.idFromName(userId);
+    const agentDO = env.AGENT.get(doId);
+    
+    // All requests for this user hit THE SAME instance
+    return agentDO.fetch(request);
+  }
+};
+```
+
+**Result:**
+
+```
+User A → /agent/alice → Agent DO (name: "alice")
+                           ├─ wallet: 0xAAA...
+                           ├─ conversations: [...]
+                           └─ budget: $50
+
+User B → /agent/bob → Agent DO (name: "bob")
+                        ├─ wallet: 0xBBB...
+                        ├─ conversations: [...]
+                        └─ budget: $100
+```
+
+## Prerequisites
+
+<CardGroup cols={2}>
+  <Card title="Cloudflare Account" icon="cloud">
+    Free tier works for development
+  </Card>
+  <Card title="Wrangler CLI" icon="terminal">
+    `npm install -g wrangler`
+  </Card>
+  <Card title="Crossmint API Key" icon="key">
+    For wallet creation
+  </Card>
+  <Card title="Node.js 18+" icon="node-js">
+    TypeScript environment
+  </Card>
+</CardGroup>
+
+## Step 1: Project Setup
+
+```bash
+npm create cloudflare@latest my-agent-do
+# Select "Hello World" template
+# Choose TypeScript
+
+cd my-agent-do
+npm install @crossmint/wallets-sdk agents x402
+```
+
+Update `wrangler.toml`:
+
+```toml wrangler.toml
+name = "my-agent-do"
+main = "src/index.ts"
+compatibility_date = "2024-03-01"
+
+# Define Durable Object bindings
+[[durable_objects.bindings]]
+name = "AGENT"
+class_name = "Agent"
+script_name = "my-agent-do"
+
+# KV for persistent storage
+[[kv_namespaces]]
+binding = "DATA"
+id = "<your-kv-namespace-id>"
+```
+
+Create KV namespace:
+
+```bash
+npx wrangler kv:namespace create "DATA"
+# Copy the ID to wrangler.toml
+```
+
+## Step 2: Define the Durable Object
+
+Create the Agent Durable Object:
+
+```typescript src/agent.ts
+import { DurableObject } from "cloudflare:workers";
+import { CrossmintWallets, createCrossmint, type Wallet } from "@crossmint/wallets-sdk";
+
+export interface Env {
+  CROSSMINT_API_KEY: string;
+  DATA: KVNamespace;
+}
+
+interface Message {
+  role: "user" | "assistant";
+  content: string;
+  timestamp: number;
+}
+
+export class Agent extends DurableObject<Env> {
+  private wallet!: Wallet<any>;
+  private messages: Message[] = [];
+  private userId: string;
+  private websockets: Set<WebSocket> = new Set();
+  
+  constructor(state: DurableObjectState, env: Env) {
+    super(state, env);
+    
+    // Extract user ID from DO name
+    this.userId = state.id.toString();
+    
+    console.log(`📦 Agent DO created for user: ${this.userId}`);
+  }
+  
+  /**
+   * Initialize wallet on first request
+   */
+  private async ensureWallet(): Promise<void> {
+    if (this.wallet) return;
+    
+    console.log(`🔧 Creating wallet for ${this.userId}...`);
+    
+    const crossmint = createCrossmint({
+      apiKey: this.env.CROSSMINT_API_KEY
+    });
+    
+    const crossmintWallets = CrossmintWallets.from(crossmint);
+    
+    this.wallet = await crossmintWallets.createWallet({
+      chain: "base-sepolia",
+      signer: { type: "api-key" },
+      owner: `user-${this.userId}`
+    });
+    
+    console.log(`✅ Wallet ready: ${this.wallet.address}`);
+  }
+  
+  /**
+   * Load conversation history from KV
+   */
+  private async loadHistory(): Promise<void> {
+    const stored = await this.env.DATA.get(`${this.userId}:messages`, "json");
+    if (stored) {
+      this.messages = stored as Message[];
+      console.log(`📚 Loaded ${this.messages.length} messages from KV`);
+    }
+  }
+  
+  /**
+   * Save conversation history to KV
+   */
+  private async saveHistory(): Promise<void> {
+    await this.env.DATA.put(
+      `${this.userId}:messages`,
+      JSON.stringify(this.messages)
+    );
+  }
+  
+  /**
+   * Broadcast message to all connected WebSockets
+   */
+  private broadcast(message: string): void {
+    for (const ws of this.websockets) {
+      try {
+        ws.send(message);
+      } catch (error) {
+        console.error("Failed to send to WebSocket:", error);
+        this.websockets.delete(ws);
+      }
+    }
+  }
+  
+  /**
+   * Handle incoming HTTP requests
+   */
+  async fetch(request: Request): Promise<Response> {
+    await this.ensureWallet();
+    
+    const url = new URL(request.url);
+    
+    // WebSocket upgrade
+    if (request.headers.get("Upgrade") === "websocket") {
+      return this.handleWebSocket(request);
+    }
+    
+    // GET /info - Return agent info
+    if (url.pathname === "/info" && request.method === "GET") {
+      return Response.json({
+        userId: this.userId,
+        walletAddress: this.wallet.address,
+        messageCount: this.messages.length
+      });
+    }
+    
+    // POST /message - Send message to agent
+    if (url.pathname === "/message" && request.method === "POST") {
+      const { content } = await request.json() as { content: string };
+      
+      // Add user message
+      const userMessage: Message = {
+        role: "user",
+        content,
+        timestamp: Date.now()
+      };
+      this.messages.push(userMessage);
+      
+      // Generate agent response (simplified)
+      const response = await this.generateResponse(content);
+      
+      const agentMessage: Message = {
+        role: "assistant",
+        content: response,
+        timestamp: Date.now()
+      };
+      this.messages.push(agentMessage);
+      
+      // Save to KV
+      await this.saveHistory();
+      
+      // Broadcast to WebSocket clients
+      this.broadcast(JSON.stringify(agentMessage));
+      
+      return Response.json({
+        response,
+        messageCount: this.messages.length
+      });
+    }
+    
+    // GET /history - Get conversation history
+    if (url.pathname === "/history" && request.method === "GET") {
+      await this.loadHistory();
+      return Response.json({
+        messages: this.messages
+      });
+    }
+    
+    return new Response("Not Found", { status: 404 });
+  }
+  
+  /**
+   * Handle WebSocket connections
+   */
+  private handleWebSocket(request: Request): Response {
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair);
+    
+    // Accept the connection
+    server.accept();
+    this.websockets.add(server);
+    
+    console.log(`🔌 WebSocket connected (total: ${this.websockets.size})`);
+    
+    // Send welcome message
+    server.send(JSON.stringify({
+      type: "welcome",
+      userId: this.userId,
+      walletAddress: this.wallet.address,
+      messageCount: this.messages.length
+    }));
+    
+    // Handle incoming messages
+    server.addEventListener("message", async (event) => {
+      try {
+        const data = JSON.parse(event.data as string);
+        
+        if (data.type === "message") {
+          // Process message
+          const response = await this.generateResponse(data.content);
+          
+          // Send response
+          server.send(JSON.stringify({
+            type: "message",
+            role: "assistant",
+            content: response,
+            timestamp: Date.now()
+          }));
+        }
+      } catch (error) {
+        console.error("WebSocket message error:", error);
+      }
+    });
+    
+    // Handle disconnection
+    server.addEventListener("close", () => {
+      this.websockets.delete(server);
+      console.log(`🔌 WebSocket disconnected (total: ${this.websockets.size})`);
+    });
+    
+    return new Response(null, {
+      status: 101,
+      webSocket: client
+    });
+  }
+  
+  /**
+   * Generate agent response (integrate with Claude, GPT, etc.)
+   */
+  private async generateResponse(userMessage: string): Promise<string> {
+    // This is where you'd call Claude, GPT, or your LLM
+    // For now, simple echo with context
+    
+    const context = this.messages.length > 0
+      ? `I remember our conversation (${this.messages.length} messages).`
+      : "This is our first message.";
+    
+    return `${context} You said: "${userMessage}". My wallet is ${this.wallet.address.slice(0, 10)}...`;
+  }
+}
+```
+
+## Step 3: Gateway Worker
+
+Create the routing layer:
+
+```typescript src/index.ts
+import { Agent, type Env } from "./agent";
+
+export { Agent };
+
+export default {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const url = new URL(request.url);
+    
+    // Extract user ID from path: /agent/{userId}
+    const pathMatch = url.pathname.match(/^\/agent\/([^\/]+)/);
+    
+    if (!pathMatch) {
+      return new Response("Usage: /agent/{userId}", { status: 400 });
+    }
+    
+    const userId = pathMatch[1];
+    
+    // Get Durable Object for this user
+    const doId = env.AGENT.idFromName(userId);
+    const agentDO = env.AGENT.get(doId);
+    
+    // Remove /agent/{userId} prefix from path
+    const newUrl = new URL(request.url);
+    newUrl.pathname = url.pathname.replace(`/agent/${userId}`, "") || "/";
+    
+    const newRequest = new Request(newUrl, request);
+    
+    // Forward to Durable Object
+    return agentDO.fetch(newRequest);
+  }
+} satisfies ExportedHandler<Env>;
+```
+
+## Step 4: Deploy and Test
+
+### Set Secrets
+
+```bash
+npx wrangler secret put CROSSMINT_API_KEY
+# Paste your API key when prompted
+```
+
+### Deploy
+
+```bash
+npx wrangler deploy
+```
+
+You'll get a URL like: `https://my-agent-do.your-subdomain.workers.dev`
+
+### Test with curl
+
+<CodeGroup>
+```bash Get Agent Info
+curl https://my-agent-do.your-subdomain.workers.dev/agent/alice/info
+
+# Response:
+{
+  "userId": "alice",
+  "walletAddress": "0x1234...",
+  "messageCount": 0
+}
+```
+
+```bash Send Message
+curl -X POST \
+  https://my-agent-do.your-subdomain.workers.dev/agent/alice/message \
+  -H "Content-Type: application/json" \
+  -d '{"content": "Hello agent!"}'
+
+# Response:
+{
+  "response": "This is our first message. You said: 'Hello agent!'. My wallet is 0x1234...",
+  "messageCount": 2
+}
+```
+
+```bash Get History
+curl https://my-agent-do.your-subdomain.workers.dev/agent/alice/history
+
+# Response:
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Hello agent!",
+      "timestamp": 1709481234567
+    },
+    {
+      "role": "assistant",
+      "content": "This is our first message...",
+      "timestamp": 1709481234890
+    }
+  ]
+}
+```
+</CodeGroup>
+
+### Test with WebSocket
+
+```javascript
+const ws = new WebSocket("wss://my-agent-do.your-subdomain.workers.dev/agent/alice");
+
+ws.onmessage = (event) => {
+  console.log("Received:", JSON.parse(event.data));
+};
+
+ws.onopen = () => {
+  ws.send(JSON.stringify({
+    type: "message",
+    content: "Hello via WebSocket!"
+  }));
+};
+```
+
+## Step 5: Add Payment Support
+
+Integrate x402 payments:
+
+```typescript src/agent.ts
+import { withX402 } from "agents/x402";
+import { createX402Signer } from "./x402Adapter";
+
+export class Agent extends DurableObject<Env> {
+  private mcpServer!: McpServer;
+  
+  async ensureWallet(): Promise<void> {
+    if (this.wallet) return;
+    
+    // ... create wallet ...
+    
+    // Create MCP server with x402 support
+    this.mcpServer = new McpServer({
+      name: `Agent-${this.userId}`,
+      version: "1.0.0"
+    });
+    
+    // Add x402 payment middleware
+    this.mcpServer.withX402({
+      wallet: createX402Signer(this.wallet),
+      facilitator: "https://x402.org/facilitator",
+      network: "base-sepolia",
+      usdcAddress: "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+    });
+    
+    // Register paid tools
+    this.mcpServer.paidTool(
+      "premium_analysis",
+      "Advanced analysis with AI",
+      0.10, // $0.10 per call
+      { query: z.string() },
+      {},
+      async ({ query }) => {
+        // Only called after payment verified!
+        return await this.runPremiumAnalysis(query);
+      }
+    );
+  }
+  
+  async fetch(request: Request): Promise<Response> {
+    await this.ensureWallet();
+    
+    // Handle MCP requests
+    if (url.pathname === "/mcp") {
+      return this.mcpServer.handleRequest(request);
+    }
+    
+    // ... rest of handlers ...
+  }
+}
+```
+
+## Advanced Patterns
+
+### 1. Alarm-Based Persistence
+
+Auto-save state periodically:
+
+```typescript
+export class Agent extends DurableObject<Env> {
+  constructor(state: DurableObjectState, env: Env) {
+    super(state, env);
+    
+    // Set alarm to save state every 5 minutes
+    this.ctx.storage.setAlarm(Date.now() + 5 * 60 * 1000);
+  }
+  
+  async alarm(): Promise<void> {
+    console.log("⏰ Alarm triggered, saving state...");
+    
+    // Save to KV
+    await this.saveHistory();
+    
+    // Schedule next alarm
+    await this.ctx.storage.setAlarm(Date.now() + 5 * 60 * 1000);
+  }
+}
+```
+
+### 2. Hibernatable WebSockets
+
+Reduce costs with hibernation:
+
+```typescript
+export class Agent extends DurableObject<Env> {
+  async webSocketMessage(ws: WebSocket, message: string): Promise<void> {
+    // Called when WebSocket receives message
+    const data = JSON.parse(message);
+    
+    // Process and respond
+    const response = await this.generateResponse(data.content);
+    ws.send(JSON.stringify({ response }));
+  }
+  
+  async webSocketClose(ws: WebSocket, code: number, reason: string): Promise<void> {
+    console.log(`WebSocket closed: ${code} ${reason}`);
+    this.websockets.delete(ws);
+  }
+}
+```
+
+### 3. Cross-DO Communication
+
+Agents can talk to each other:
+
+```typescript
+export class Agent extends DurableObject<Env> {
+  async sendToAgent(targetUserId: string, message: string): Promise<void> {
+    // Get target agent's DO
+    const targetId = this.env.AGENT.idFromName(targetUserId);
+    const targetDO = this.env.AGENT.get(targetId);
+    
+    // Send message
+    await targetDO.fetch(new Request("http://internal/receive", {
+      method: "POST",
+      body: JSON.stringify({ from: this.userId, message })
+    }));
+  }
+}
+```
+
+## Production Considerations
+
+<AccordionGroup>
+  <Accordion title="State Persistence">
+    Durable Objects keep state in memory, but:
+    
+    - **Use KV for critical data** (messages, transactions)
+    - **Set alarms** to periodically flush to KV
+    - **Handle hibernation** - objects can be evicted when idle
+    - **Test recovery** - ensure state rebuilds correctly
+  </Accordion>
+
+  <Accordion title="Scaling">
+    - **Global distribution**: DOs created near users automatically
+    - **No limits on DOs**: Create millions of instances
+    - **Cost**: $0.15 per million requests + $0.02 per GB-second
+    - **Hibernation**: Idle DOs cost $0 until woken
+  </Accordion>
+
+  <Accordion title="Monitoring">
+    ```typescript
+    export class Agent extends DurableObject<Env> {
+      async fetch(request: Request): Promise<Response> {
+        const start = Date.now();
+        
+        try {
+          const response = await this.handleRequest(request);
+          
+          // Log successful request
+          console.log({
+            userId: this.userId,
+            path: new URL(request.url).pathname,
+            duration: Date.now() - start,
+            status: response.status
+          });
+          
+          return response;
+        } catch (error) {
+          // Log error
+          console.error({
+            userId: this.userId,
+            error: error instanceof Error ? error.message : String(error)
+          });
+          
+          throw error;
+        }
+      }
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Common Patterns
+
+### Session Management
+
+```typescript
+interface Session {
+  id: string;
+  createdAt: number;
+  lastActive: number;
+  metadata: Record<string, any>;
+}
+
+export class Agent extends DurableObject<Env> {
+  private sessions: Map<string, Session> = new Map();
+  
+  createSession(metadata: Record<string, any>): string {
+    const sessionId = crypto.randomUUID();
+    
+    this.sessions.set(sessionId, {
+      id: sessionId,
+      createdAt: Date.now(),
+      lastActive: Date.now(),
+      metadata
+    });
+    
+    return sessionId;
+  }
+  
+  getSession(sessionId: string): Session | undefined {
+    const session = this.sessions.get(sessionId);
+    if (session) {
+      session.lastActive = Date.now();
+    }
+    return session;
+  }
+}
+```
+
+### Rate Limiting
+
+```typescript
+interface RateLimit {
+  requests: number[];
+  limit: number;
+  window: number;
+}
+
+export class Agent extends DurableObject<Env> {
+  private rateLimits = new Map<string, RateLimit>();
+  
+  checkRateLimit(key: string, limit = 10, window = 60000): boolean {
+    const now = Date.now();
+    const limiter = this.rateLimits.get(key) || {
+      requests: [],
+      limit,
+      window
+    };
+    
+    // Remove old requests
+    limiter.requests = limiter.requests.filter(t => now - t < window);
+    
+    // Check limit
+    if (limiter.requests.length >= limit) {
+      return false;
+    }
+    
+    // Add request
+    limiter.requests.push(now);
+    this.rateLimits.set(key, limiter);
+    
+    return true;
+  }
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Event RSVP" icon="calendar" href="/examples/event-rsvp">
+    See a production DO-based agent system
+  </Card>
+  <Card title="Cloudflare Agents" icon="cloud" href="/a2a/cloudflare-agents">
+    Agent-to-agent payments on the edge
+  </Card>
+  <Card title="DO Docs" icon="book" href="https://developers.cloudflare.com/durable-objects/">
+    Official Cloudflare documentation
+  </Card>
+  <Card title="Workers SDK" icon="code" href="https://developers.cloudflare.com/workers/">
+    Cloudflare Workers platform docs
+  </Card>
+</CardGroup>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="DO not found / 404 errors">
+    - Verify DO is exported in `src/index.ts`: `export { Agent }`
+    - Check `wrangler.toml` has correct binding name
+    - Ensure `class_name` matches exported class
+    - Try `wrangler deploy` again
+  </Accordion>
+
+  <Accordion title="State not persisting">
+    - DOs keep state in memory, not disk
+    - Use KV for durable storage: `env.DATA.put(...)`
+    - Set alarms for periodic saves
+    - Test after simulated eviction
+  </Accordion>
+
+  <Accordion title="WebSocket disconnections">
+    - Check hibernation settings
+    - Implement reconnection logic in client
+    - Use heartbeat/ping-pong to keep alive
+    - Monitor close codes for debugging
+  </Accordion>
+</AccordionGroup>

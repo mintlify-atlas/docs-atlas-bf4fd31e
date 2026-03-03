@@ -1,0 +1,660 @@
+---
+title: Production Deployment
+description: Production deployment checklist and mainnet configuration for Crossmint Agentic Finance
+---
+
+## Overview
+
+Deploying AI agents to production requires careful configuration, security hardening, and switching from testnet to mainnet. This guide covers everything you need for a production-ready deployment.
+
+## Pre-Deployment Checklist
+
+<Steps>
+  <Step title="Security Review">
+    - [ ] All API keys stored as secrets (not in code)
+    - [ ] CORS configured for specific origins (not `*`)
+    - [ ] Rate limiting enabled
+    - [ ] Input validation on all endpoints
+    - [ ] Error messages don't leak sensitive data
+  </Step>
+  
+  <Step title="Network Configuration">
+    - [ ] Switch to mainnet chain configuration
+    - [ ] Update USDC contract addresses
+    - [ ] Verify chain IDs are correct
+    - [ ] Test with small amounts first
+  </Step>
+  
+  <Step title="Monitoring Setup">
+    - [ ] Cloudflare Analytics enabled
+    - [ ] Error tracking configured
+    - [ ] Payment failure alerts set up
+    - [ ] Wallet balance monitoring
+  </Step>
+  
+  <Step title="Testing">
+    - [ ] End-to-end payment flow tested
+    - [ ] Error handling verified
+    - [ ] Load testing completed
+    - [ ] Wallet recovery process documented
+  </Step>
+</Steps>
+
+## Mainnet Configuration
+
+### Switch from Testnet to Mainnet
+
+Update your chain configuration to use production networks.
+
+#### Base Mainnet Configuration
+
+Update `src/constants.ts`:
+
+```typescript src/constants.ts
+// BEFORE (Testnet)
+export const USDC_BASE_SEPOLIA = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
+export const NETWORK = "base-sepolia";
+export const CHAIN_ID = 84532;
+
+// AFTER (Mainnet)
+export const USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+export const NETWORK = "base";
+export const CHAIN_ID = 8453;
+```
+
+#### Network Comparison
+
+| Configuration | Base Sepolia (Testnet) | Base (Mainnet) |
+|--------------|------------------------|----------------|
+| **Chain ID** | `84532` | `8453` |
+| **Network Name** | `base-sepolia` | `base` |
+| **USDC Address** | `0x036CbD53842c5426634e7929541eC2318f3dCF7e` | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` |
+| **RPC URL** | `https://sepolia.base.org` | `https://mainnet.base.org` |
+| **Explorer** | [sepolia.basescan.org](https://sepolia.basescan.org) | [basescan.org](https://basescan.org) |
+| **Test Tokens** | [Circle Faucet](https://faucet.circle.com/) | Real USDC required |
+
+### Update All Chain References
+
+Search your codebase for testnet references:
+
+```bash
+# Find all testnet references
+grep -r "base-sepolia" src/
+grep -r "84532" src/
+grep -r "0x036CbD53842c5426634e7929541eC2318f3dCF7e" src/
+```
+
+Update each occurrence to mainnet values.
+
+### Crossmint Wallet Configuration
+
+Update wallet creation to use mainnet:
+
+```typescript
+// BEFORE (Testnet)
+const wallet = CrossmintWalletService.from({
+  apiKey: env.CROSSMINT_API_KEY,
+  chain: "base-sepolia"
+});
+
+// AFTER (Mainnet)
+const wallet = CrossmintWalletService.from({
+  apiKey: env.CROSSMINT_API_KEY,
+  chain: "base"  // Mainnet
+});
+```
+
+<Warning>
+  Double-check all network configurations before deploying to mainnet. Sending transactions to the wrong network can result in lost funds.
+</Warning>
+
+## API Keys and Secrets
+
+### Production API Keys
+
+<AccordionGroup>
+  <Accordion title="Crossmint Production Key">
+    1. Go to [Crossmint Console](https://www.crossmint.com/console)
+    2. Create a **production** project (not development)
+    3. Generate API key with minimal required scopes:
+       - `wallets.create`
+       - `wallets.read`
+       - `wallets:messages.sign`
+    4. Store securely - you can't view it again
+    
+    ```bash
+    npx wrangler secret put CROSSMINT_API_KEY
+    # Paste production key (starts with sk_prod_...)
+    ```
+  </Accordion>
+  
+  <Accordion title="OpenAI Production Key">
+    1. Visit [OpenAI Platform](https://platform.openai.com)
+    2. Create API key with spending limits
+    3. Set up usage alerts in OpenAI dashboard
+    
+    ```bash
+    npx wrangler secret put OPENAI_API_KEY
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### Secret Management Best Practices
+
+```bash
+# List all secrets
+npx wrangler secret list
+
+# Rotate secrets regularly
+npx wrangler secret put CROSSMINT_API_KEY
+npx wrangler secret put OPENAI_API_KEY
+
+# Delete old secrets
+npx wrangler secret delete OLD_KEY_NAME
+```
+
+<Tip>
+  Set up a secret rotation schedule (e.g., every 90 days) and document the process.
+</Tip>
+
+## Security Hardening
+
+### CORS Configuration
+
+Restrict CORS to your frontend domains only:
+
+```typescript
+// BEFORE (Development - too permissive)
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': '*',
+  'Access-Control-Allow-Headers': '*'
+};
+
+// AFTER (Production - restrictive)
+const allowedOrigins = [
+  'https://yourdomain.com',
+  'https://www.yourdomain.com'
+];
+
+const origin = request.headers.get('Origin');
+const corsHeaders = {
+  'Access-Control-Allow-Origin': allowedOrigins.includes(origin) 
+    ? origin 
+    : allowedOrigins[0],
+  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, X-Payment',
+  'Access-Control-Max-Age': '86400'
+};
+```
+
+### Rate Limiting
+
+Protect against abuse with Cloudflare WAF:
+
+```toml wrangler.toml
+# Add to wrangler.toml for Cloudflare WAF rules
+[rate_limiting]
+enabled = true
+
+[[rate_limiting.rules]]
+name = "api-rate-limit"
+action = "challenge"
+period = 60
+requests_per_period = 100
+```
+
+Or implement in your Worker:
+
+```typescript
+// Simple in-memory rate limiting (for Durable Objects)
+class RateLimiter {
+  private requests = new Map<string, number[]>();
+  
+  async isAllowed(ip: string, limit: number, windowMs: number): Promise<boolean> {
+    const now = Date.now();
+    const timestamps = this.requests.get(ip) || [];
+    
+    // Filter out old timestamps
+    const recent = timestamps.filter(t => now - t < windowMs);
+    
+    if (recent.length >= limit) {
+      return false;
+    }
+    
+    recent.push(now);
+    this.requests.set(ip, recent);
+    return true;
+  }
+}
+```
+
+### Input Validation
+
+Validate all inputs with Zod schemas:
+
+```typescript
+import { z } from 'zod';
+
+// Define strict schemas
+const createEventSchema = z.object({
+  title: z.string().min(1).max(200),
+  description: z.string().max(2000),
+  price: z.number().min(0.01).max(1000),
+  date: z.string().datetime(),
+  maxAttendees: z.number().int().min(1).max(10000).optional()
+});
+
+// Validate before processing
+const result = createEventSchema.safeParse(requestData);
+if (!result.success) {
+  return new Response(
+    JSON.stringify({ error: 'Invalid input', details: result.error }),
+    { status: 400 }
+  );
+}
+```
+
+### Error Handling
+
+Never expose internal errors to users:
+
+```typescript
+// BAD - leaks internal details
+try {
+  await processPayment();
+} catch (error) {
+  return new Response(error.message, { status: 500 });
+}
+
+// GOOD - logs internally, returns safe message
+try {
+  await processPayment();
+} catch (error) {
+  console.error('[Payment Error]', error);
+  return new Response(
+    JSON.stringify({ error: 'Payment processing failed' }),
+    { status: 500 }
+  );
+}
+```
+
+## Monitoring and Alerts
+
+### Cloudflare Analytics
+
+1. Go to Cloudflare Dashboard → **Workers & Pages**
+2. Select your Worker
+3. Click **Metrics** tab
+4. Monitor:
+   - Request rate
+   - Error rate
+   - CPU time
+   - Durable Object operations
+
+### Payment Monitoring
+
+Track payment metrics in KV:
+
+```typescript
+// Increment payment counters
+await env.SECRETS.put(`metrics:payments:total`, 
+  (parseInt(await env.SECRETS.get('metrics:payments:total') || '0') + 1).toString()
+);
+
+await env.SECRETS.put(`metrics:payments:failed`,
+  (parseInt(await env.SECRETS.get('metrics:payments:failed') || '0') + 1).toString()
+);
+
+// Track revenue
+await env.SECRETS.put(`metrics:revenue:total`,
+  (parseInt(await env.SECRETS.get('metrics:revenue:total') || '0') + amount).toString()
+);
+```
+
+Create a monitoring endpoint:
+
+```typescript
+// GET /metrics (protected by API key)
+if (url.pathname === '/metrics') {
+  const apiKey = request.headers.get('X-API-Key');
+  if (apiKey !== env.ADMIN_API_KEY) {
+    return new Response('Unauthorized', { status: 401 });
+  }
+  
+  const metrics = {
+    paymentsTotal: await env.SECRETS.get('metrics:payments:total'),
+    paymentsFailed: await env.SECRETS.get('metrics:payments:failed'),
+    revenueTotal: await env.SECRETS.get('metrics:revenue:total'),
+    timestamp: new Date().toISOString()
+  };
+  
+  return Response.json(metrics);
+}
+```
+
+### Wallet Balance Alerts
+
+Monitor wallet balances and alert when low:
+
+```typescript
+import { createPublicClient, http } from 'viem';
+import { base } from 'viem/chains';
+
+async function checkWalletBalance(walletAddress: string) {
+  const client = createPublicClient({
+    chain: base,
+    transport: http()
+  });
+  
+  // Check USDC balance
+  const balance = await client.readContract({
+    address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+    abi: [{
+      name: 'balanceOf',
+      type: 'function',
+      stateMutability: 'view',
+      inputs: [{ name: 'account', type: 'address' }],
+      outputs: [{ type: 'uint256' }]
+    }],
+    functionName: 'balanceOf',
+    args: [walletAddress]
+  });
+  
+  // Alert if balance < $10
+  const balanceUsd = Number(balance) / 1_000_000;
+  if (balanceUsd < 10) {
+    console.warn(`[ALERT] Wallet balance low: $${balanceUsd}`);
+    // Send notification (email, Slack, etc.)
+  }
+  
+  return balanceUsd;
+}
+```
+
+### Error Tracking
+
+Integrate with error tracking services:
+
+```typescript
+// Example: Sentry integration
+import * as Sentry from '@sentry/cloudflare';
+
+Sentry.init({
+  dsn: env.SENTRY_DSN,
+  environment: 'production',
+  tracesSampleRate: 0.1
+});
+
+try {
+  // Your code
+} catch (error) {
+  Sentry.captureException(error);
+  throw error;
+}
+```
+
+## Testing Production Deployment
+
+### Test with Small Amounts
+
+Before going live, test with minimal USDC amounts:
+
+```typescript
+// Temporarily reduce prices for testing
+const TEST_MODE = env.ENVIRONMENT === 'staging';
+
+this.server.paidTool(
+  "rsvpToEvent",
+  "RSVP to an event",
+  TEST_MODE ? 0.01 : 0.05,  // $0.01 for staging, $0.05 for production
+  schema,
+  {},
+  handler
+);
+```
+
+### Smoke Tests
+
+```bash
+# Test basic endpoints
+curl https://yourdomain.com/
+
+# Test agent endpoint
+curl https://yourdomain.com/agent
+
+# Test MCP endpoint (should return 402 or 401)
+curl https://yourdomain.com/mcp/users/test
+
+# Test with payment header (get from staging test)
+curl -H "X-Payment: <test-payment>" https://yourdomain.com/protected
+```
+
+### Load Testing
+
+Use tools like `k6` to test under load:
+
+```javascript load-test.js
+import http from 'k6/http';
+import { check, sleep } from 'k6';
+
+export const options = {
+  stages: [
+    { duration: '30s', target: 10 },   // Ramp up to 10 users
+    { duration: '1m', target: 50 },    // Ramp up to 50 users
+    { duration: '30s', target: 0 },    // Ramp down
+  ],
+};
+
+export default function () {
+  const res = http.get('https://yourdomain.com/');
+  check(res, {
+    'status is 200': (r) => r.status === 200,
+    'response time < 500ms': (r) => r.timings.duration < 500,
+  });
+  sleep(1);
+}
+```
+
+Run the test:
+```bash
+k6 run load-test.js
+```
+
+## Wallet Management
+
+### Wallet Recovery Process
+
+Document how to recover wallets in case of API key loss:
+
+1. **Crossmint Wallets**: Contact Crossmint support with project details
+2. **Export wallet addresses**: Keep a backup of all wallet addresses
+3. **Private key wallets**: Store private keys in secure vault (1Password, AWS Secrets Manager)
+
+### Backup Critical Data
+
+```bash
+# Export all KV data
+npx wrangler kv:key list --namespace-id=<KV_ID> > kv-backup.json
+
+# Backup specific keys
+npx wrangler kv:key get "users:email:admin@example.com" --namespace-id=<KV_ID>
+```
+
+Schedule regular backups:
+
+```bash
+# Add to cron job (runs daily)
+0 2 * * * cd /path/to/project && npx wrangler kv:key list --namespace-id=<KV_ID> > backups/kv-$(date +\%Y\%m\%d).json
+```
+
+## Deployment Script
+
+Create a production deployment script:
+
+```bash deploy-production.sh
+#!/bin/bash
+set -e
+
+echo "🚀 Starting production deployment..."
+
+# Confirm mainnet configuration
+echo "⚠️  This will deploy to MAINNET. Continue? (yes/no)"
+read -r confirm
+if [ "$confirm" != "yes" ]; then
+  echo "Deployment cancelled"
+  exit 1
+fi
+
+# Run tests
+echo "🧪 Running tests..."
+npm test
+
+# Build frontend
+echo "🏗️  Building frontend..."
+npm run build
+
+# Deploy to Cloudflare
+echo "☁️  Deploying to Cloudflare..."
+npx wrangler deploy
+
+# Verify deployment
+echo "✅ Deployment complete!"
+echo "🌐 URL: https://yourdomain.com"
+echo "📊 Monitor: https://dash.cloudflare.com"
+
+# Run smoke tests
+echo "🧪 Running smoke tests..."
+curl -f https://yourdomain.com/ || echo "❌ Smoke test failed"
+
+echo "✨ Production deployment successful!"
+```
+
+Make it executable:
+```bash
+chmod +x deploy-production.sh
+./deploy-production.sh
+```
+
+## Post-Deployment
+
+<Steps>
+  <Step title="Verify Deployment">
+    - [ ] All endpoints responding correctly
+    - [ ] Payment flow works end-to-end
+    - [ ] Monitoring dashboards showing data
+    - [ ] Error rates within acceptable range
+  </Step>
+  
+  <Step title="Monitor for 24 Hours">
+    - [ ] Watch error logs
+    - [ ] Check payment success rate
+    - [ ] Monitor wallet balances
+    - [ ] Review performance metrics
+  </Step>
+  
+  <Step title="Documentation">
+    - [ ] Update README with production URLs
+    - [ ] Document runbook for common issues
+    - [ ] Share on-call procedures with team
+    - [ ] Create incident response plan
+  </Step>
+</Steps>
+
+## Production Checklist Summary
+
+<Accordion title="Complete Production Checklist">
+  **Configuration**
+  - [ ] Mainnet chain IDs updated (8453 for Base)
+  - [ ] Mainnet USDC address updated
+  - [ ] Crossmint chain set to "base" (not "base-sepolia")
+  - [ ] RPC URLs point to mainnet
+  - [ ] Explorer links updated
+  
+  **Security**
+  - [ ] Production API keys set via Wrangler secrets
+  - [ ] CORS restricted to production domains
+  - [ ] Rate limiting enabled
+  - [ ] Input validation on all endpoints
+  - [ ] Error messages sanitized
+  - [ ] Admin endpoints protected
+  
+  **Monitoring**
+  - [ ] Cloudflare Analytics enabled
+  - [ ] Payment metrics tracking implemented
+  - [ ] Wallet balance monitoring set up
+  - [ ] Error tracking integrated (Sentry/etc)
+  - [ ] Alerts configured
+  
+  **Testing**
+  - [ ] Smoke tests passing
+  - [ ] Load tests completed
+  - [ ] Payment flow tested with small amounts
+  - [ ] Error scenarios tested
+  - [ ] Wallet recovery process documented
+  
+  **Deployment**
+  - [ ] KV namespaces created
+  - [ ] Secrets set in Cloudflare
+  - [ ] Custom domain configured (optional)
+  - [ ] CI/CD pipeline set up (optional)
+  - [ ] Rollback process tested
+  
+  **Documentation**
+  - [ ] Runbook created
+  - [ ] On-call procedures documented
+  - [ ] Incident response plan ready
+  - [ ] Team trained on monitoring tools
+</Accordion>
+
+## Troubleshooting Production Issues
+
+<AccordionGroup>
+  <Accordion title="High error rate after deployment">
+    1. Check Wrangler logs: `npx wrangler tail --status error`
+    2. Verify all secrets are set: `npx wrangler secret list`
+    3. Check KV namespace IDs match wrangler.toml
+    4. Rollback if critical: `npx wrangler rollback <DEPLOYMENT_ID>`
+  </Accordion>
+  
+  <Accordion title="Payment verification failing">
+    1. Verify chain ID matches network (8453 for Base mainnet)
+    2. Check USDC contract address is correct for mainnet
+    3. Confirm facilitator URL is accessible
+    4. Check wallet has USDC balance on mainnet
+    5. Review transaction on [Basescan](https://basescan.org)
+  </Accordion>
+  
+  <Accordion title="Wallet balance draining unexpectedly">
+    1. Check recent transactions on explorer
+    2. Review payment logs for unusual patterns
+    3. Verify rate limiting is working
+    4. Check for unauthorized API key usage
+    5. Rotate API keys immediately if compromised
+  </Accordion>
+  
+  <Accordion title="Durable Objects state inconsistency">
+    1. Check DO migration ran successfully
+    2. Review DO logs: `npx wrangler tail | grep "[Host DO]"`
+    3. Verify KV data integrity
+    4. Consider resetting specific DO instance (data loss!)
+    5. Contact Cloudflare support for persistent issues
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Monitor Dashboard" icon="chart-line" href="https://dash.cloudflare.com">
+    View real-time metrics and logs in Cloudflare Dashboard
+  </Card>
+  <Card title="Crossmint Console" icon="wallet" href="https://www.crossmint.com/console">
+    Manage wallets and view transaction history
+  </Card>
+  <Card title="Base Explorer" icon="magnifying-glass" href="https://basescan.org">
+    Track on-chain transactions and wallet balances
+  </Card>
+  <Card title="Support" icon="life-ring" href="https://discord.gg/crossmint">
+    Get help from the Crossmint community
+  </Card>
+</CardGroup>

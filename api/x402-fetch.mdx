@@ -1,0 +1,305 @@
+---
+title: x402-fetch
+description: Fetch API wrapper with automatic x402 payment handling
+---
+
+## Overview
+
+The `x402-fetch` package wraps the native `fetch` API to automatically handle x402 payment protocol. When a server responds with `402 Payment Required`, the wrapper automatically signs the payment and retries the request.
+
+## Installation
+
+```bash
+npm install x402-fetch
+```
+
+## Basic Usage
+
+```typescript
+import { wrapFetchWithPayment } from "x402-fetch";
+import { createX402Signer } from "./x402Adapter";
+
+// Create a signer from your wallet
+const signer = createX402Signer(wallet);
+
+// Wrap the native fetch function
+const fetchWithPay = wrapFetchWithPayment(fetch, signer);
+
+// Use it like normal fetch - payments are automatic
+const response = await fetchWithPay("https://api.example.com/protected", {
+  method: "GET"
+});
+
+const data = await response.json();
+```
+
+## API Reference
+
+### `wrapFetchWithPayment(fetchFn, signer)`
+
+Wraps a fetch function to automatically handle x402 payments.
+
+#### Parameters
+
+- **`fetchFn`** (`typeof fetch`) - The fetch function to wrap (usually global `fetch`)
+- **`signer`** (`Signer`) - An x402-compatible signer for creating payment signatures
+
+#### Returns
+
+A wrapped fetch function with the same signature as the native `fetch` API.
+
+#### Signer Interface
+
+The signer must implement:
+
+```typescript
+interface Signer {
+  account: { address: string };
+  chain: { id: number };
+  signTypedData(params: {
+    domain: any;
+    types: any;
+    primaryType: string;
+    message: any;
+  }): Promise<`0x${string}`>;
+}
+```
+
+## Examples
+
+### Cloudflare Worker Agent
+
+From the `cloudflare-agents` demo ([source](https://github.com/Crossmint/crossmint-agentic-finance/blob/main/cloudflare-agents/src/index.ts#L77-L163)):
+
+```typescript
+import { Agent } from "agents";
+import { wrapFetchWithPayment } from "x402-fetch";
+import { CrossmintWallets, createCrossmint } from "@crossmint/wallets-sdk";
+import { createX402Signer } from "./x402Adapter";
+
+export class PayAgent extends Agent {
+  wallet!: any;
+  fetchWithPay!: ReturnType<typeof wrapFetchWithPayment>;
+
+  async onStart() {
+    // Initialize Crossmint wallet
+    const crossmint = createCrossmint({
+      apiKey: this.env.CROSSMINT_API_KEY,
+    });
+    const wallets = CrossmintWallets.from(crossmint);
+
+    this.wallet = await wallets.createWallet({
+      chain: "base-sepolia",
+      signer: { type: "api-key" },
+      owner: "userId:pay-agent-1"
+    });
+
+    console.log("🤖 Agent wallet:", this.wallet.address);
+
+    // Create x402-compatible signer and wrap fetch
+    const x402Signer = createX402Signer(this.wallet);
+    this.fetchWithPay = wrapFetchWithPayment(fetch, x402Signer);
+  }
+
+  async onRequest(req: Request) {
+    const url = new URL(req.url);
+    const paidUrl = new URL("/protected-route", url.origin).toString();
+
+    console.log("🤖 Agent accessing paid endpoint...");
+
+    // fetchWithPay automatically handles 402 responses
+    const response = await this.fetchWithPay(paidUrl, {});
+    const responseText = await response.text();
+
+    console.log("✅ Payment successful, received content");
+
+    return new Response(responseText, {
+      status: response.status,
+      headers: response.headers
+    });
+  }
+}
+```
+
+### Creating x402-Compatible Signer
+
+From the Crossmint wallet adapter ([source](https://github.com/Crossmint/crossmint-agentic-finance/blob/main/send-tweet/sendvia/app/x402Adapter.ts#L13-L61)):
+
+```typescript
+import { EVMWallet, type Wallet } from "@crossmint/wallets-sdk";
+import type { Signer } from "x402/types";
+
+/**
+ * Convert a Crossmint wallet to an x402-compatible signer
+ */
+export function createX402Signer(wallet: Wallet<any>): Signer {
+  const evm = EVMWallet.from(wallet);
+
+  const signer: any = {
+    account: { address: evm.address },
+    chain: { id: 84532 }, // Base Sepolia
+    transport: {},
+
+    async signTypedData(params: any) {
+      const { domain, message, primaryType, types } = params;
+
+      console.log("🔐 Signing x402 payment data", {
+        walletAddress: evm.address,
+        primaryType,
+        domain,
+        message
+      });
+
+      // Sign with Crossmint wallet
+      const sig = await evm.signTypedData({
+        domain,
+        message,
+        primaryType,
+        types,
+        chain: evm.chain as any
+      } as any);
+
+      console.log("✅ Payment signature created");
+
+      return processSignature(sig.signature as string);
+    }
+  };
+
+  return signer as Signer;
+}
+
+function processSignature(rawSignature: string): `0x${string}` {
+  const signature = rawSignature.startsWith('0x') 
+    ? rawSignature 
+    : `0x${rawSignature}`;
+
+  // Handle ERC-6492 wrapped signatures (for pre-deployed wallets)
+  if (signature.endsWith("6492649264926492649264926492649264926492649264926492649264926492")) {
+    return signature as `0x${string}`;
+  }
+
+  // Handle standard ECDSA signatures
+  if (signature.length === 132) {
+    return signature as `0x${string}`;
+  }
+
+  return signature as `0x${string}`;
+}
+```
+
+### Checking Wallet Deployment
+
+Before making payments, you may need to check if a smart wallet is deployed:
+
+```typescript
+import { createPublicClient, http } from "viem";
+import { baseSepolia } from "viem/chains";
+
+async function checkWalletDeployment(walletAddress: string): Promise<boolean> {
+  const publicClient = createPublicClient({
+    chain: baseSepolia,
+    transport: http("https://sepolia.base.org")
+  });
+
+  const code = await publicClient.getCode({
+    address: walletAddress as `0x${string}`
+  });
+
+  // If bytecode exists, the wallet is deployed
+  return code !== undefined && code !== '0x' && code.length > 2;
+}
+```
+
+### Deploying Pre-deployed Wallets
+
+If using Crossmint smart wallets with ERC-6492, you may need to deploy them:
+
+```typescript
+import { EVMWallet } from "@crossmint/wallets-sdk";
+
+async function deployWallet(wallet: any): Promise<string> {
+  console.log("🚀 Deploying wallet on-chain...");
+
+  const evmWallet = EVMWallet.from(wallet);
+
+  // Deploy wallet with a minimal self-transfer (1 wei)
+  const deploymentTx = await evmWallet.sendTransaction({
+    to: wallet.address,
+    value: 1n,
+    data: "0x"
+  });
+
+  console.log(`✅ Wallet deployed! TX: ${deploymentTx.hash}`);
+  return deploymentTx.hash || "";
+}
+```
+
+## How It Works
+
+1. **Initial Request**: You call the wrapped fetch with a URL
+2. **Intercept 402**: If server responds with `402 Payment Required`, the wrapper intercepts it
+3. **Parse Requirements**: Extract payment details from the 402 response body
+4. **Sign Payment**: Use the provided signer to create an EIP-712 signature
+5. **Retry with Payment**: Automatically retry the request with `X-PAYMENT` header
+6. **Return Response**: Return the successful response to your code
+
+The entire payment flow is transparent - you use it just like normal fetch!
+
+## Payment Headers
+
+The wrapper automatically manages these headers:
+
+- **Request**: `Accept: application/vnd.x402+json` (indicates x402 support)
+- **Retry**: `X-PAYMENT: <signature>` (contains payment authorization)
+- **Response**: `X-PAYMENT-RESPONSE: <receipt>` (payment confirmation)
+
+## Error Handling
+
+The wrapper preserves standard fetch error behavior:
+
+```typescript
+try {
+  const response = await fetchWithPay(url);
+  
+  if (!response.ok) {
+    console.error("Request failed:", response.status);
+  }
+  
+  const data = await response.json();
+} catch (error) {
+  console.error("Payment or network error:", error);
+}
+```
+
+Common errors:
+- Payment signature failed: Check wallet balance and deployment status
+- Network errors: Standard fetch network issues
+- 402 persists: Signature verification failed on server
+
+## TypeScript Types
+
+```typescript
+import type { Signer } from "x402/types";
+
+type WrappedFetch = (
+  input: RequestInfo | URL,
+  init?: RequestInit
+) => Promise<Response>;
+
+function wrapFetchWithPayment(
+  fetchFn: typeof fetch,
+  signer: Signer
+): WrappedFetch;
+```
+
+## Related
+
+- [x402-axios](/api/x402-axios) - Axios interceptor for x402
+- [x402-hono](/api/x402-hono) - Server-side middleware for Hono
+- [Crossmint Wallets](/api/crossmint-wallets) - Creating x402-compatible wallets
+
+## Source Code
+
+View complete examples:
+- [cloudflare-agents demo](https://github.com/Crossmint/crossmint-agentic-finance/tree/main/cloudflare-agents)
+- [events-concierge demo](https://github.com/Crossmint/crossmint-agentic-finance/tree/main/events-concierge)

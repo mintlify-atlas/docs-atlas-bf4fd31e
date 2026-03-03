@@ -1,122 +1,124 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mint Starter Kit",
+  "name": "Crossmint Agentic Finance",
+  "theme": "aspen",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#4F46E5",
+    "light": "#818CF8",
+    "dark": "#3730A3"
   },
-  "favicon": "/favicon.svg",
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/Crossmint/crossmint-agentic-finance"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/Crossmint/crossmint-agentic-finance"
+    }
+  },
   "navigation": {
     "tabs": [
       {
-        "tab": "Guides",
+        "tab": "Documentation",
         "groups": [
           {
-            "group": "Getting started",
+            "group": "Get Started",
             "pages": [
-              "index",
+              "introduction",
               "quickstart",
-              "development"
+              "prerequisites"
             ]
           },
           {
-            "group": "Customization",
+            "group": "Core Concepts",
             "pages": [
-              "essentials/settings",
-              "essentials/navigation"
+              "concepts/x402-protocol",
+              "concepts/a2a-payments",
+              "concepts/smart-wallets",
+              "concepts/payment-flow"
             ]
           },
           {
-            "group": "Writing content",
+            "group": "HTTP Paywalls",
             "pages": [
-              "essentials/markdown",
-              "essentials/code",
-              "essentials/images",
-              "essentials/reusable-snippets"
+              "paywalls/ping",
+              "paywalls/weather",
+              "paywalls/ping-crossmint",
+              "paywalls/solana"
             ]
           },
           {
-            "group": "AI tools",
+            "group": "Agent-to-Agent",
             "pages": [
-              "ai-tools/cursor",
-              "ai-tools/claude-code",
-              "ai-tools/windsurf"
+              "a2a/hello-eoa",
+              "a2a/hello-crossmint",
+              "a2a/send-tweet",
+              "a2a/events-concierge",
+              "a2a/cloudflare-agents"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/local-development",
+              "deployment/cloudflare",
+              "deployment/production"
             ]
           }
         ]
       },
       {
-        "tab": "API reference",
+        "tab": "API Reference",
         "groups": [
           {
-            "group": "API documentation",
+            "group": "x402 SDK",
             "pages": [
-              "api-reference/introduction"
+              "api/x402-express",
+              "api/x402-hono",
+              "api/x402-fetch",
+              "api/x402-axios"
             ]
           },
           {
-            "group": "Endpoint examples",
+            "group": "Crossmint SDK",
             "pages": [
-              "api-reference/endpoint/get",
-              "api-reference/endpoint/create",
-              "api-reference/endpoint/delete",
-              "api-reference/endpoint/webhook"
+              "api/crossmint-wallets",
+              "api/crossmint-adapter"
+            ]
+          },
+          {
+            "group": "Payment Verification",
+            "pages": [
+              "api/eip-712-signatures",
+              "api/erc-6492-validation",
+              "api/facilitator"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Examples",
+        "groups": [
+          {
+            "group": "Production Examples",
+            "pages": [
+              "examples/worldstore-agent",
+              "examples/ad-agent",
+              "examples/event-rsvp"
+            ]
+          },
+          {
+            "group": "Tutorials",
+            "pages": [
+              "tutorials/build-paywall",
+              "tutorials/autonomous-agent",
+              "tutorials/durable-objects"
             ]
           }
         ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
-  "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
-    "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://dashboard.mintlify.com"
-    }
-  },
-  "contextual": {
-    "options": [
-     "copy",
-     "view",
-     "chatgpt",
-     "claude",
-     "perplexity",
-     "mcp",
-     "cursor",
-     "vscode"
-   ]
-  },
-  "footer": {
-    "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
-    }
+    ]
   }
 }

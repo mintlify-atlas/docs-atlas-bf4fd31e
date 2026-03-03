@@ -1,0 +1,215 @@
+---
+title: x402-express
+description: Express.js middleware for HTTP 402 payment-required responses
+---
+
+## Overview
+
+The `x402-express` package provides Express.js middleware to protect API routes with the x402 payment protocol. When a request arrives without payment, the middleware responds with `402 Payment Required` and payment details. When a valid payment signature is included, the middleware verifies it and allows the request to proceed.
+
+## Installation
+
+```bash
+npm install x402-express
+```
+
+## Basic Usage
+
+```typescript
+import express from "express";
+import { paymentMiddleware } from "x402-express";
+
+const app = express();
+
+const payTo = "0x2bA11889a65DEC5467530A8C204d45EE6F8497e7";
+
+app.use(paymentMiddleware(payTo, {
+  "GET /ping": { price: "$0.001", network: "base-sepolia" }
+}));
+
+app.get("/ping", (req, res) => {
+  res.json({ message: "pong" });
+});
+
+app.listen(3000);
+```
+
+## API Reference
+
+### `paymentMiddleware(payTo, routes, options?)`
+
+Creates Express middleware that enforces payment requirements on specified routes.
+
+#### Parameters
+
+- **`payTo`** (`string`) - EVM address that receives payments (must be a valid 0x-prefixed address)
+- **`routes`** (`Record<string, RouteConfig>`) - Map of route patterns to payment configurations
+- **`options`** (`object`, optional) - Additional configuration options
+  - **`url`** (`string`) - Facilitator URL for payment settlement (default: `"https://x402.org/facilitator"`)
+  - **`createAuthHeaders`** (`function`, optional) - Custom function to create authorization headers for facilitator
+
+#### Route Configuration
+
+Each route in the `routes` object has the following properties:
+
+```typescript
+type RouteConfig = {
+  price: string;        // USD price with $ prefix (e.g., "$0.001")
+  network: string;      // Blockchain network (e.g., "base-sepolia", "base")
+  config?: {
+    description?: string;  // Optional description of the service
+  };
+};
+```
+
+#### Route Pattern Matching
+
+Route patterns should match the format `"METHOD /path"`, for example:
+- `"GET /ping"`
+- `"POST /tweet"`
+- `"GET /api/data"`
+
+## Examples
+
+### Simple Protected Endpoint
+
+From the `ping` demo ([source](https://github.com/Crossmint/crossmint-agentic-finance/blob/main/ping/src/server.ts#L11-L13)):
+
+```typescript
+import express from "express";
+import { paymentMiddleware } from "x402-express";
+import * as dotenv from "dotenv";
+
+dotenv.config();
+
+const app = express();
+const port = 3000;
+const payTo = process.env.PAY_TO || "0x0000000000000000000000000000000000000000";
+
+app.use(paymentMiddleware(payTo, {
+  "GET /ping": { price: "$0.001", network: "base-sepolia" }
+}));
+
+app.get("/ping", (_req, res) => {
+  res.json({ message: "pong" });
+});
+
+app.listen(port);
+```
+
+### Advanced Configuration with Custom Facilitator
+
+From the `send-tweet` demo ([source](https://github.com/Crossmint/crossmint-agentic-finance/blob/main/send-tweet/sendvia/middleware.ts)):
+
+```typescript
+import express from "express";
+import cors from "cors";
+import { paymentMiddleware } from "x402-express";
+
+const app = express();
+const payTo = process.env.MERCHANT_ADDRESS || "0x2bA11889a65DEC5467530A8C204d45EE6F8497e7";
+const network = (process.env.X402_NETWORK || "base-sepolia") as any;
+
+// Apply CORS before payment middleware
+app.use(cors({
+  origin: ["http://localhost:3000"],
+  credentials: true,
+  exposedHeaders: ["X-PAYMENT-RESPONSE"],
+}));
+
+// Payment middleware for POST /tweet
+app.use(paymentMiddleware(payTo as any, {
+  "POST /tweet": { price: `$${process.env.PRICE_USDC || "1"}`, network }
+}, {
+  url: "https://x402.org/facilitator",
+  createAuthHeaders: undefined
+}));
+
+app.post("/tweet", async (req, res) => {
+  const { text, imageUrl } = req.body ?? {};
+  
+  // Payment verified by middleware - execute protected logic
+  const twitter = createTwitterClient();
+  const result = await twitter.v2.tweet(text);
+  
+  res.json({
+    success: true,
+    tweetId: result.data.id,
+    tweetUrl: `https://twitter.com/user/status/${result.data.id}`
+  });
+});
+```
+
+### Multiple Protected Routes
+
+```typescript
+import express from "express";
+import { paymentMiddleware } from "x402-express";
+
+const app = express();
+const payTo = "0x2bA11889a65DEC5467530A8C204d45EE6F8497e7";
+
+app.use(paymentMiddleware(payTo, {
+  "GET /api/data": { 
+    price: "$0.01", 
+    network: "base-sepolia",
+    config: { description: "Access to premium data API" }
+  },
+  "POST /api/process": { 
+    price: "$0.05", 
+    network: "base-sepolia",
+    config: { description: "Process data with AI" }
+  },
+  "GET /api/analytics": { 
+    price: "$0.10", 
+    network: "base-sepolia" 
+  }
+}));
+
+app.get("/api/data", (req, res) => {
+  res.json({ data: [1, 2, 3] });
+});
+
+app.post("/api/process", (req, res) => {
+  res.json({ processed: true });
+});
+```
+
+## How It Works
+
+1. **Initial Request**: Client makes a request to a protected route
+2. **402 Response**: Middleware responds with `402 Payment Required` and includes payment details in the response body
+3. **Client Signs**: Client creates an EIP-712 typed data signature authorizing the payment
+4. **Retry with Payment**: Client retries the request with an `X-PAYMENT` header containing the signature
+5. **Verification**: Middleware verifies the signature and forwards to the facilitator for settlement
+6. **Success**: If payment is valid, the request proceeds to the route handler
+
+## Response Headers
+
+When using x402-express with CORS, make sure to expose the `X-PAYMENT-RESPONSE` header:
+
+```typescript
+app.use(cors({
+  exposedHeaders: ["X-PAYMENT-RESPONSE"],
+}));
+```
+
+## Error Handling
+
+The middleware handles payment errors automatically:
+
+- Returns `402 Payment Required` when payment is missing
+- Returns `402 Payment Required` when signature verification fails
+- Returns `500 Internal Server Error` for facilitator communication errors
+
+## Related
+
+- [x402-axios](/api/x402-axios) - Client-side interceptor for Axios
+- [x402-hono](/api/x402-hono) - Middleware for Hono framework
+- [x402 Protocol](/concepts/x402-protocol) - Understanding the payment protocol
+
+## Source Code
+
+View complete examples:
+- [ping demo](https://github.com/Crossmint/crossmint-agentic-finance/tree/main/ping)
+- [send-tweet demo](https://github.com/Crossmint/crossmint-agentic-finance/tree/main/send-tweet)

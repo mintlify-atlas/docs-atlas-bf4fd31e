@@ -1,0 +1,300 @@
+---
+title: x402-hono
+description: Hono middleware for HTTP 402 payment-required responses in Cloudflare Workers
+---
+
+## Overview
+
+The `x402-hono` package provides Hono middleware to protect API routes with the x402 payment protocol. It's designed for Cloudflare Workers, Durable Objects, and edge runtime environments.
+
+## Installation
+
+```bash
+npm install x402-hono
+```
+
+## Basic Usage
+
+```typescript
+import { Hono } from "hono";
+import { paymentMiddleware } from "x402-hono";
+
+const app = new Hono();
+
+const payTo = "0x2bA11889a65DEC5467530A8C204d45EE6F8497e7";
+
+const middleware = paymentMiddleware(
+  payTo as `0x${string}`,
+  {
+    "/protected-route": {
+      price: "$0.10",
+      network: "base-sepolia",
+      config: {
+        description: "Access to premium API content"
+      }
+    }
+  },
+  { url: "https://x402.org/facilitator" }
+);
+
+app.use("*", middleware);
+
+app.get("/protected-route", (c) => {
+  return c.json({
+    message: "This content is behind a paywall",
+    premium: true
+  });
+});
+
+export default app;
+```
+
+## API Reference
+
+### `paymentMiddleware(payTo, routes, options?)`
+
+Creates Hono middleware that enforces payment requirements on specified routes.
+
+#### Parameters
+
+- **`payTo`** (`0x${string}`) - EVM address that receives payments (must be a valid 0x-prefixed address)
+- **`routes`** (`Record<string, RouteConfig>`) - Map of route paths to payment configurations
+- **`options`** (`object`, optional) - Additional configuration options
+  - **`url`** (`string`) - Facilitator URL for payment settlement (default: `"https://x402.org/facilitator"`)
+  - **`createAuthHeaders`** (`function`, optional) - Custom function to create authorization headers for facilitator
+
+#### Route Configuration
+
+Each route in the `routes` object has the following properties:
+
+```typescript
+type RouteConfig = {
+  price: string;        // USD price with $ prefix (e.g., "$0.10")
+  network: string;      // Blockchain network (e.g., "base-sepolia", "base")
+  config?: {
+    description?: string;  // Optional description of the service
+  };
+};
+```
+
+#### Route Pattern Matching
+
+Unlike Express, Hono routes use path-only patterns (no HTTP method prefix):
+- `"/protected-route"`
+- `"/api/data"`
+- `"/mcp/tools"`
+
+The middleware works with all HTTP methods (GET, POST, etc.) for the specified path.
+
+## Examples
+
+### Cloudflare Worker with MCP Server
+
+From the `cloudflare-agents` demo ([source](https://github.com/Crossmint/crossmint-agentic-finance/blob/main/cloudflare-agents/src/index.ts#L196-L209)):
+
+```typescript
+import { Hono } from "hono";
+import { paymentMiddleware } from "x402-hono";
+import { CrossmintWallets, createCrossmint } from "@crossmint/wallets-sdk";
+
+type Env = {
+  CROSSMINT_API_KEY: string;
+};
+
+const app = new Hono<{ Bindings: Env }>();
+let serverWallet: any;
+let paymentMiddlewareHandler: any;
+
+async function initializeServerWallet(apiKey: string) {
+  const crossmint = createCrossmint({ apiKey });
+  const wallets = CrossmintWallets.from(crossmint);
+
+  serverWallet = await wallets.createWallet({
+    chain: "base-sepolia",
+    signer: { type: "api-key" },
+    owner: "userId:x402-server"
+  });
+
+  console.log("💼 Server wallet:", serverWallet.address);
+
+  paymentMiddlewareHandler = paymentMiddleware(
+    serverWallet.address as `0x${string}`,
+    {
+      "/protected-route": {
+        price: "$0.10",
+        network: "base-sepolia",
+        config: {
+          description: "Access to premium Crossmint API content"
+        }
+      }
+    },
+    { url: "https://x402.org/facilitator" }
+  );
+
+  return serverWallet.address;
+}
+
+// Initialize wallet and apply middleware
+app.use("*", async (c, next) => {
+  if (!serverWallet) {
+    await initializeServerWallet(c.env.CROSSMINT_API_KEY);
+  }
+  if (paymentMiddlewareHandler) {
+    return paymentMiddlewareHandler(c, next);
+  }
+  await next();
+});
+
+app.get("/protected-route", (c) => {
+  return c.json({
+    message: "🎉 This content is behind a paywall. Thanks for paying!",
+    data: {
+      premium: true,
+      timestamp: new Date().toISOString()
+    }
+  });
+});
+
+export default app;
+```
+
+### MCP Tools with x402 Payments
+
+From the `events-concierge` agent integration ([source](https://github.com/Crossmint/crossmint-agentic-finance/blob/main/events-concierge/src/agents/host.ts)):
+
+```typescript
+import { Agent } from "agents";
+import { withX402 } from "agents/x402";
+import { paymentMiddleware } from "x402-hono";
+
+// In your Cloudflare Worker/Durable Object:
+class HostAgent extends Agent {
+  async onStart() {
+    // Configure x402 payments for MCP tools
+    const x402Config = {
+      payTo: "0x...",  // Your wallet address
+      network: "base-sepolia",
+      facilitator: "https://x402.org/facilitator"
+    };
+
+    // Wrap MCP server with x402 payment capabilities
+    withX402(this.mcp, x402Config, {
+      rsvpToEvent: { price: "$0.05" }  // Mark tools as paid
+    });
+  }
+}
+```
+
+### Multiple Protected Routes
+
+```typescript
+import { Hono } from "hono";
+import { paymentMiddleware } from "x402-hono";
+
+const app = new Hono();
+const payTo = "0x2bA11889a65DEC5467530A8C204d45EE6F8497e7";
+
+const middleware = paymentMiddleware(
+  payTo as `0x${string}`,
+  {
+    "/api/data": { 
+      price: "$0.01", 
+      network: "base-sepolia",
+      config: { description: "Access to premium data API" }
+    },
+    "/api/process": { 
+      price: "$0.05", 
+      network: "base-sepolia",
+      config: { description: "Process data with AI" }
+    },
+    "/api/analytics": { 
+      price: "$0.10", 
+      network: "base-sepolia" 
+    }
+  },
+  { url: "https://x402.org/facilitator" }
+);
+
+app.use("*", middleware);
+
+app.get("/api/data", (c) => c.json({ data: [1, 2, 3] }));
+app.post("/api/process", (c) => c.json({ processed: true }));
+app.get("/api/analytics", (c) => c.json({ views: 1000 }));
+
+export default app;
+```
+
+## How It Works
+
+1. **Initial Request**: Client makes a request to a protected route
+2. **402 Response**: Middleware responds with `402 Payment Required` and includes payment details
+3. **Client Signs**: Client creates an EIP-712 typed data signature authorizing the payment
+4. **Retry with Payment**: Client retries the request with an `X-PAYMENT` header containing the signature
+5. **Verification**: Middleware verifies the signature and forwards to the facilitator for settlement
+6. **Success**: If payment is valid, the request proceeds to the route handler
+
+## Cloudflare Workers Configuration
+
+When deploying to Cloudflare Workers, configure CORS headers:
+
+```typescript
+import { Hono } from "hono";
+import { cors } from "hono/cors";
+import { paymentMiddleware } from "x402-hono";
+
+const app = new Hono();
+
+// Apply CORS first
+app.use("*", cors({
+  origin: ["http://localhost:5173", "https://yourdomain.com"],
+  allowMethods: ["GET", "POST", "OPTIONS"],
+  allowHeaders: ["Content-Type", "X-PAYMENT"],
+  exposeHeaders: ["X-PAYMENT-RESPONSE"],
+  credentials: true,
+}));
+
+// Then apply payment middleware
+app.use("*", paymentMiddleware(/* ... */));
+```
+
+## Error Handling
+
+The middleware handles payment errors automatically:
+
+- Returns `402 Payment Required` when payment is missing
+- Returns `402 Payment Required` when signature verification fails
+- Returns `500 Internal Server Error` for facilitator communication errors
+
+## Durable Objects Integration
+
+When using with Cloudflare Durable Objects:
+
+```typescript
+import { Agent } from "agents";
+import { paymentMiddleware } from "x402-hono";
+
+export class MyDurableObject extends Agent {
+  async fetch(request: Request) {
+    // Apply payment middleware within Durable Object
+    const middleware = paymentMiddleware(/* ... */);
+    
+    const app = new Hono();
+    app.use("*", middleware);
+    app.get("/protected", (c) => c.json({ success: true }));
+    
+    return app.fetch(request);
+  }
+}
+```
+
+## Related
+
+- [x402-fetch](/api/x402-fetch) - Client-side wrapper for fetch API
+- [x402-express](/api/x402-express) - Middleware for Express.js
+- [Events Concierge](/a2a/events-concierge) - Production example with MCP integration
+
+## Source Code
+
+View complete examples:
+- [cloudflare-agents demo](https://github.com/Crossmint/crossmint-agentic-finance/tree/main/cloudflare-agents)
+- [events-concierge demo](https://github.com/Crossmint/crossmint-agentic-finance/tree/main/events-concierge)

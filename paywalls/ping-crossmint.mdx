@@ -1,0 +1,553 @@
+---
+title: 'Ping Crossmint Demo'
+description: 'Full-stack HTTP 402 paywall with Crossmint smart wallet UI integration'
+---
+
+# Ping Crossmint Demo
+
+The Ping Crossmint demo is a complete full-stack implementation showing how to integrate Crossmint smart wallets with the x402 payment protocol. It includes both a React client with UI and an Express server with detailed logging.
+
+## Overview
+
+This demo demonstrates:
+- **React Client**: Full UI for wallet creation, deployment, and payment execution
+- **Express Server**: Protected endpoints with x402 middleware and facilitator integration
+- **Smart Wallets**: Crossmint wallet integration with two signer types (API Key and Email OTP)
+- **Payment Flow**: Complete end-to-end payment from user approval to settlement
+
+**Key Features:**
+- Crossmint smart wallet creation and management
+- Two authentication methods: API Key (server-side) and Email OTP (client-side)
+- Wallet deployment with ERC-6492 pre-deployment support
+- Balance checking (ETH and USDC)
+- Payment approval UI with detailed transaction info
+- Comprehensive logging and debugging tools
+
+## Prerequisites
+
+### Development Environment
+- **Node.js 18.17.0 or higher**
+- **npm 9.0.0 or higher**
+- **Git**
+
+### Crossmint Account
+
+1. Create account at https://www.crossmint.com/
+2. Navigate to **Developer Console → API Keys**
+3. Generate two API keys:
+   - **Server API Key** (format: `sk_staging_...`) - For API key signer
+   - **Client API Key** (format: `ck_staging_...`) - For Email OTP signer
+4. **Important:** Save keys securely - never commit to git
+
+### Testnet Tokens
+
+**ETH for gas fees (0.01 ETH minimum):**
+- Visit: https://www.alchemy.com/faucets/base-sepolia
+- Paste your wallet address
+- Request tokens
+
+**USDC for payments (1 USDC minimum):**
+- Visit: https://faucet.circle.com/
+- Select "Base Sepolia" network
+- Paste your wallet address
+- Request USDC
+
+## Setup
+
+### 1. Clone and Install
+
+```bash
+cd ping-crossmint
+
+# Install server dependencies
+cd server
+npm install
+
+# Install client dependencies
+cd ../client
+npm install
+```
+
+### 2. Configure Server
+
+```bash server/.env
+PORT=3100
+PAY_TO=0x233521928665E16de96267D17313571687eC41b7
+NETWORK=base-sepolia
+```
+
+**Configuration Options:**
+- `PORT` - Server listen port (default: 3100)
+- `PAY_TO` - Payment recipient address (use your own to receive testnet USDC)
+- `NETWORK` - Payment settlement network (default: base-sepolia)
+
+Start the server:
+
+```bash
+cd server
+npm run dev
+```
+
+**Expected Output:**
+```
+Server running on http://localhost:3100
+Network: base-sepolia
+Payment recipient: 0x2335...c41b7
+Protected endpoints:
+  GET /ping -> $0.001 USDC
+```
+
+### 3. Start Client
+
+```bash
+cd client
+npm run dev
+```
+
+**Expected Output:**
+```
+VITE ready in 234 ms
+➜  Local:   http://localhost:5174/
+```
+
+### 4. Verify Setup
+
+```bash
+# Test server health
+curl http://localhost:3100/health
+
+# Test 402 response
+curl -H "Accept: application/vnd.x402+json" http://localhost:3100/ping
+
+# Open client in browser
+open http://localhost:5174
+```
+
+## Server Implementation
+
+The server uses x402-express middleware with facilitator integration:
+
+```typescript server/src/server.ts
+import express from "express";
+import cors from "cors";
+import { paymentMiddleware } from "x402-express";
+import { facilitator } from "@coinbase/x402";
+import * as dotenv from "dotenv";
+
+dotenv.config();
+
+const app = express();
+const port = process.env.PORT ? Number(process.env.PORT) : 3100;
+const payTo = process.env.PAY_TO || "0x233521928665E16de96267D17313571687eC41b7";
+const network = process.env.NETWORK || "base-sepolia";
+
+// CORS configuration for client
+app.use(cors({
+  origin: ["http://localhost:5173", "http://localhost:5174"],
+  credentials: true,
+}));
+
+// Apply payment middleware with facilitator
+app.use(paymentMiddleware(payTo, {
+  "GET /ping": { price: "$0.001", network }
+}, facilitator));
+
+// Health check endpoint (no payment required)
+app.get("/health", (_req, res) => {
+  res.json({
+    status: "healthy",
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    port,
+    network,
+    payTo: payTo.substring(0, 10) + "...",
+    endpoints: { ping: "$0.001" }
+  });
+});
+
+// Protected ping endpoint
+app.get("/ping", (_req, res) => {
+  res.json({ message: "pong" });
+});
+
+app.listen(port, () => {
+  console.log(`Server listening on http://localhost:${port}`);
+});
+```
+
+### Debug Logging
+
+The server includes comprehensive logging middleware:
+
+```typescript
+app.use((req, res, next) => {
+  const xpay = req.header("X-PAYMENT");
+  console.log(`[REQ] ${req.method} ${req.path} xpay=${xpay ? `len:${xpay.length}` : "none"}`);
+  
+  if (xpay) {
+    const decoded = exact.evm.decodePayment(xpay);
+    console.log(`[X-PAYMENT] network=${decoded.network}`);
+    console.log(`[X-PAYMENT] authorization.from: ${decoded.payload.authorization.from}`);
+    console.log(`[X-PAYMENT] authorization.to: ${decoded.payload.authorization.to}`);
+    console.log(`[X-PAYMENT] authorization.value: ${decoded.payload.authorization.value}`);
+  }
+  
+  res.on("finish", () => {
+    console.log(`[RES] ${req.method} ${req.path} -> ${res.statusCode}`);
+  });
+  
+  next();
+});
+```
+
+## Client Implementation
+
+### Project Structure
+
+```
+client/
+├── src/
+│   ├── components/
+│   │   ├── WalletDisplay.tsx      # Wallet address, balances, status
+│   │   ├── PaymentApproval.tsx    # Payment confirmation dialog
+│   │   ├── ServerStatus.tsx       # Server health indicator
+│   │   └── ActivityLogs.tsx       # Event logging display
+│   ├── hooks/
+│   │   ├── useCrossmintWallet.ts  # Wallet init, deployment, OTP
+│   │   ├── useX402Payments.ts     # Payment request/execution
+│   │   └── useWalletBalances.ts   # ETH/USDC balance queries
+│   ├── utils/
+│   │   ├── x402Adapter.ts         # Crossmint → x402 signer adapter
+│   │   └── walletGuards.ts        # Deployment checks, utilities
+│   ├── constants/
+│   │   └── chains.ts              # Chain configs, RPC URLs, USDC
+│   └── types/                      # TypeScript definitions
+└── package.json
+```
+
+### Key Integration: x402 Adapter
+
+The critical integration point between Crossmint SDK and x402:
+
+```typescript client/src/utils/x402Adapter.ts
+import type { Signer } from "x402";
+import type { EVMSmartWallet } from "@crossmint/wallets-sdk";
+
+export function createX402Signer(wallet: EVMSmartWallet): Signer {
+  return {
+    async signTypedData(typedData) {
+      const signature = await wallet.signTypedData(typedData);
+      return signature as `0x${string}`;
+    },
+    address: wallet.address as `0x${string}`,
+    chainId: wallet.chain.id
+  };
+}
+```
+
+This adapter:
+- Converts Crossmint wallet to x402 Signer interface
+- Preserves ERC-6492 pre-deployment signatures
+- Handles EIP-1271 deployed wallet signatures
+- Maintains compatibility with facilitator
+
+## Usage Guide
+
+### 1. Initialize Wallet
+
+#### API Key Signer (Simpler)
+
+1. Open http://localhost:5174
+2. **Signer Type**: Select "API Key"
+3. **API Key**: Enter your `sk_staging_...` key
+4. **Email**: `your-email@example.com`
+5. **Chain**: `base-sepolia`
+6. **Server URL**: `http://localhost:3100`
+7. Click **"Initialize Wallet"**
+
+**Success Output:**
+```
+✅ Crossmint wallet created!
+📍 Wallet address: 0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb
+🏗️ Wallet status: pre-deployed
+```
+
+#### Email OTP Signer (More Secure)
+
+1. **Signer Type**: Select "Email OTP"
+2. **API Key**: Enter your `ck_staging_...` key
+3. **Email**: Enter accessible email address
+4. Click **"Initialize Wallet"**
+5. Click **"Send OTP"**
+6. Check email for 6-digit code
+7. Enter code and click **"Verify OTP"**
+
+**Success Output:**
+```
+✅ OTP verified successfully!
+✅ Crossmint wallet created!
+📍 Wallet address: 0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb
+```
+
+### 2. Fund Wallet
+
+Copy the wallet address and fund with testnet tokens:
+
+```bash
+# Get Base Sepolia ETH
+# Visit: https://www.alchemy.com/faucets/base-sepolia
+# Paste: 0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb
+# Wait 30-60 seconds
+
+# Get Base Sepolia USDC
+# Visit: https://faucet.circle.com/
+# Select: Base Sepolia
+# Paste: 0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb
+# Wait 30-60 seconds
+```
+
+**Verify balances in UI:**
+```
+💰 ETH: 0.1000
+💰 USDC: 10.0000
+```
+
+### 3. Deploy Wallet (Optional but Recommended)
+
+Pre-deployed wallets work for signature verification but may fail at settlement.
+
+1. Click **"Deploy Wallet"**
+2. Wait 30-60 seconds for confirmation
+3. Status changes to **"deployed"**
+
+**Expected Output:**
+```
+🚀 Deploying wallet...
+📝 Transaction hash: 0x1a2b3c4d...
+✅ Wallet deployed successfully!
+```
+
+**Cost:** ~0.001 ETH (Base Sepolia gas)
+
+### 4. Make Payment Request
+
+1. Click **"Make Ping"**
+2. Server returns 402 Payment Required
+
+**UI displays:**
+```
+💳 Payment Required
+Amount: 0.001000 USDC
+Recipient: 0x2335...c41b7
+Network: base-sepolia
+```
+
+### 5. Approve and Execute Payment
+
+1. Review payment details
+2. Click **"Approve Payment"**
+3. Wallet signs authorization (automatic)
+4. Client retries with X-PAYMENT header
+
+**Success Output:**
+```
+✅ Payment executed successfully!
+📨 Server response: {"message":"pong"}
+🎉 X402 + Crossmint payment complete!
+```
+
+## Payment Flow
+
+<Steps>
+  <Step title="Initial Request">
+    Client requests `/ping` without payment header
+  </Step>
+  <Step title="402 Response">
+    Server returns payment requirements in JSON format
+  </Step>
+  <Step title="Sign Authorization">
+    Crossmint wallet signs EIP-712 typed data
+  </Step>
+  <Step title="Retry with Payment">
+    Client includes signed payment in X-PAYMENT header
+  </Step>
+  <Step title="Verify Signature">
+    Server verifies signature off-chain (ERC-6492 or EIP-1271)
+  </Step>
+  <Step title="Settlement">
+    Facilitator attempts on-chain USDC transfer
+  </Step>
+  <Step title="Return Content">
+    Server returns `{"message":"pong"}` on success
+  </Step>
+</Steps>
+
+## Signature Formats
+
+### Pre-deployed Wallet (ERC-6492)
+
+```
+Format: 0x<signature><factory-data>6492649264926492...
+Length: ~854 characters
+Purpose: Signature verification before contract deployment
+```
+
+**How it works:**
+- Signature includes deployment parameters
+- Can be verified off-chain without deployed contract
+- Facilitator may fail settlement (requires deployment)
+- Demonstrates successful signature verification
+
+### Deployed Wallet (EIP-1271)
+
+```
+Format: 0x<signature-data>
+Length: ~174 characters
+Purpose: Contract validates via isValidSignature()
+```
+
+**How it works:**
+- Smart contract implements EIP-1271 interface
+- On-chain signature validation
+- Full settlement support
+- Production-ready pattern
+
+## API Reference
+
+### GET /health
+
+Health check endpoint - no payment required.
+
+**Request:**
+```bash
+curl http://localhost:3100/health
+```
+
+**Response:**
+```json
+{
+  "status": "healthy",
+  "timestamp": "2024-10-02T14:32:15.234Z",
+  "uptime": 3456.789,
+  "port": 3100,
+  "network": "base-sepolia",
+  "payTo": "0x233521928...",
+  "endpoints": {
+    "ping": "$0.001"
+  }
+}
+```
+
+### GET /ping
+
+Protected endpoint requiring $0.001 USDC payment.
+
+**Request (without payment):**
+```bash
+curl -H "Accept: application/vnd.x402+json" http://localhost:3100/ping
+```
+
+**Response (402):**
+```json
+{
+  "accepts": [{
+    "payTo": "0x233521928665E16de96267D17313571687eC41b7",
+    "network": "base-sepolia",
+    "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+    "maxAmountRequired": "1000"
+  }],
+  "version": "2"
+}
+```
+
+**Request (with payment):**
+```bash
+curl -H "X-PAYMENT: <base64>" http://localhost:3100/ping
+```
+
+**Response (200):**
+```json
+{
+  "message": "pong"
+}
+```
+
+## Dependencies
+
+### Client
+
+```json
+{
+  "dependencies": {
+    "@crossmint/wallets-sdk": "latest",
+    "@crossmint/client-sdk-react-ui": "latest",
+    "x402-axios": "^0.6.1",
+    "viem": "^2.37.6",
+    "axios": "^1.12.2",
+    "react": "^18.2.0"
+  }
+}
+```
+
+### Server
+
+```json
+{
+  "dependencies": {
+    "express": "^5.1.0",
+    "x402-express": "^0.6.1",
+    "@coinbase/x402": "^0.6.1",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.2"
+  }
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Solana Demo" icon="bolt" href="/paywalls/solana">
+    Implement paywalls on Solana blockchain
+  </Card>
+  <Card title="Weather Demo" icon="cloud" href="/paywalls/weather">
+    Protect dynamic endpoints with query parameters
+  </Card>
+  <Card title="Crossmint Docs" icon="book" href="https://docs.crossmint.com/wallets">
+    Deep dive into Crossmint Wallets SDK
+  </Card>
+  <Card title="x402 Protocol" icon="circle-nodes" href="https://x402.org">
+    Read the full x402 specification
+  </Card>
+</CardGroup>
+
+## Troubleshooting
+
+### Wallet Initialization Fails
+
+**Error:** "Invalid API key"
+
+**Solution:** Use `sk_staging_...` for API Key signer, `ck_staging_...` for Email OTP signer.
+
+### Payment Settlement Fails
+
+**Message:** "Payment verification completed, settlement had issues"
+
+**Status:** Expected with pre-deployed wallets. Signature verification works, on-chain settlement requires deployment.
+
+**Solution:** Deploy wallet first for full end-to-end payment flow.
+
+### Port Already in Use
+
+**Error:** `EADDRINUSE`
+
+**Solution:**
+```bash
+# Find process
+lsof -i :3100
+
+# Kill it
+kill -9 <PID>
+
+# Or use different port
+PORT=3200 npm run dev
+```

@@ -1,0 +1,568 @@
+---
+title: "Build an HTTP Paywall"
+description: "Step-by-step tutorial: Create a paid API endpoint using x402 protocol"
+---
+
+# Build an HTTP Paywall from Scratch
+
+Learn how to create a paid API endpoint that requires USDC payment before granting access. This tutorial covers the x402 protocol fundamentals and builds a production-ready paywall.
+
+<Info>
+  **Time to complete**: 15-20 minutes
+  
+  **What you'll build**: An Express server with a `/weather` endpoint that requires $0.001 USDC payment
+</Info>
+
+## Prerequisites
+
+<CardGroup cols={2}>
+  <Card title="Node.js" icon="node-js">
+    Version 18.17.0 or higher
+  </Card>
+  <Card title="Wallet Address" icon="wallet">
+    An Ethereum address to receive payments
+  </Card>
+  <Card title="Base Sepolia RPC" icon="network-wired">
+    Testnet for development (free)
+  </Card>
+  <Card title="Basic TypeScript" icon="code">
+    Familiarity with Express and async/await
+  </Card>
+</CardGroup>
+
+## What You'll Learn
+
+- How the x402 protocol works (402 status code + payment headers)
+- Implementing payment middleware for Express
+- Handling payment verification and settlement
+- Testing paywalls with curl and payment clients
+
+## Step 1: Project Setup
+
+Create a new project and install dependencies:
+
+<CodeGroup>
+```bash Terminal
+mkdir weather-paywall
+cd weather-paywall
+npm init -y
+npm install express x402-express dotenv
+npm install -D typescript @types/express @types/node ts-node
+```
+
+```json package.json
+{
+  "name": "weather-paywall",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "ts-node src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "x402-express": "^0.6.0",
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.10.5",
+    "ts-node": "^10.9.2"
+  }
+}
+```
+
+```json tsconfig.json
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "commonjs",
+    "lib": ["ES2020"],
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules"]
+}
+```
+</CodeGroup>
+
+## Step 2: Environment Configuration
+
+Create a `.env` file with your payment address:
+
+```bash .env
+# Your wallet address to receive payments
+PAY_TO=0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb
+
+# Server configuration
+PORT=3100
+
+# Network (base-sepolia for testnet)
+NETWORK=base-sepolia
+```
+
+<Warning>
+  Replace `PAY_TO` with your actual Ethereum address. This is where USDC payments will be sent.
+</Warning>
+
+## Step 3: Weather Data Service
+
+Create a simple weather service using the Open-Meteo API (no API key required):
+
+```typescript src/weather.ts
+interface WeatherData {
+  city: string;
+  temperature: number;
+  conditions: string;
+  humidity: number;
+  timestamp: string;
+}
+
+// Geocoding: city name → lat/lon
+async function getCityCoordinates(city: string): Promise<{ lat: number; lon: number }> {
+  const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(city)}&count=1&language=en&format=json`;
+  
+  const response = await fetch(url);
+  const data = await response.json();
+  
+  if (!data.results || data.results.length === 0) {
+    throw new Error(`City not found: ${city}`);
+  }
+  
+  return {
+    lat: data.results[0].latitude,
+    lon: data.results[0].longitude
+  };
+}
+
+// Weather API: lat/lon → current weather
+async function getWeatherByCoords(lat: number, lon: number): Promise<Omit<WeatherData, 'city'>> {
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current_weather=true&hourly=relative_humidity_2m`;
+  
+  const response = await fetch(url);
+  const data = await response.json();
+  
+  const current = data.current_weather;
+  const humidity = data.hourly.relative_humidity_2m[0];
+  
+  // Map WMO weather codes to conditions
+  const weatherCodes: Record<number, string> = {
+    0: "Clear sky",
+    1: "Mainly clear",
+    2: "Partly cloudy",
+    3: "Overcast",
+    45: "Foggy",
+    48: "Depositing rime fog",
+    51: "Light drizzle",
+    61: "Slight rain",
+    63: "Moderate rain",
+    65: "Heavy rain",
+    71: "Slight snow",
+    95: "Thunderstorm"
+  };
+  
+  return {
+    temperature: current.temperature,
+    conditions: weatherCodes[current.weathercode] || "Unknown",
+    humidity,
+    timestamp: new Date().toISOString()
+  };
+}
+
+// Main export: city name → weather data
+export async function getWeather(city: string): Promise<WeatherData> {
+  const coords = await getCityCoordinates(city);
+  const weather = await getWeatherByCoords(coords.lat, coords.lon);
+  
+  return {
+    city,
+    ...weather
+  };
+}
+```
+
+## Step 4: Server with x402 Middleware
+
+Create the Express server with payment middleware:
+
+```typescript src/server.ts
+import express, { Request, Response } from "express";
+import { paymentMiddleware } from "x402-express";
+import * as dotenv from "dotenv";
+import { getWeather } from "./weather";
+
+dotenv.config();
+
+const app = express();
+const port = process.env.PORT ? Number(process.env.PORT) : 3100;
+const payTo = process.env.PAY_TO || "0x0000000000000000000000000000000000000000";
+const network = process.env.NETWORK || "base-sepolia";
+
+// Apply payment middleware BEFORE route handlers
+app.use(paymentMiddleware(payTo, {
+  "GET /weather": { price: "$0.001", network }
+}));
+
+// Protected route - only accessible after payment
+app.get("/weather", async (req: Request, res: Response) => {
+  try {
+    const city = req.query.city as string;
+    
+    if (!city) {
+      return res.status(400).json({
+        error: "Missing 'city' query parameter",
+        example: "/weather?city=San%20Francisco"
+      });
+    }
+    
+    // Fetch weather data
+    const weatherData = await getWeather(city);
+    
+    // Return weather info
+    res.json({
+      success: true,
+      data: weatherData
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: "Failed to fetch weather",
+      message: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
+// Health check endpoint (free, no payment)
+app.get("/health", (_req: Request, res: Response) => {
+  res.json({
+    status: "healthy",
+    timestamp: new Date().toISOString(),
+    payTo,
+    network
+  });
+});
+
+app.listen(port, () => {
+  console.log(`✅ Weather paywall server running on http://localhost:${port}`);
+  console.log(`💰 Payments to: ${payTo}`);
+  console.log(`🌐 Network: ${network}`);
+  console.log(`\nTry: curl -i "http://localhost:${port}/weather?city=Paris"`);
+});
+```
+
+## Step 5: Understanding the x402 Flow
+
+When a request hits the `/weather` endpoint:
+
+<Steps>
+  <Step title="Request Without Payment">
+    ```bash
+    curl -i -H "Accept: application/json" "http://localhost:3100/weather?city=Paris"
+    ```
+    
+    **Response: 402 Payment Required**
+    ```http
+    HTTP/1.1 402 Payment Required
+    Content-Type: application/json
+    
+    {
+      "error": "Payment Required",
+      "accepts": [
+        {
+          "type": "exact",
+          "network": "base-sepolia",
+          "chainId": 84532,
+          "maxAmountRequired": "1000",
+          "minAmountRequired": "1000",
+          "payTo": "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb",
+          "payWith": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+          "resource": "GET /weather?city=Paris",
+          "facilitator": "https://x402.org/facilitator"
+        }
+      ]
+    }
+    ```
+  </Step>
+
+  <Step title="Client Signs Payment">
+    Using an x402 client (like `x402-axios`), the client:
+    
+    1. Detects the 402 response
+    2. Extracts payment requirements from `accepts[0]`
+    3. Signs an EIP-712 message with the payment details
+    4. Generates `X-PAYMENT` header
+  </Step>
+
+  <Step title="Retry with Payment Header">
+    ```bash
+    curl -i \
+      -H "Accept: application/json" \
+      -H "X-PAYMENT: <base64-encoded-signature>" \
+      "http://localhost:3100/weather?city=Paris"
+    ```
+  </Step>
+
+  <Step title="Middleware Verifies Payment">
+    The `paymentMiddleware`:
+    
+    1. Extracts signature from `X-PAYMENT` header
+    2. Sends to facilitator for verification
+    3. Facilitator settles USDC on-chain
+    4. Returns transaction hash
+    5. Middleware passes request to route handler
+  </Step>
+
+  <Step title="Success Response">
+    ```http
+    HTTP/1.1 200 OK
+    Content-Type: application/json
+    X-PAYMENT-RESPONSE: {"success":true,"transaction":"0xabc..."}
+    
+    {
+      "success": true,
+      "data": {
+        "city": "Paris",
+        "temperature": 18.5,
+        "conditions": "Partly cloudy",
+        "humidity": 65,
+        "timestamp": "2025-03-03T10:30:00.000Z"
+      }
+    }
+    ```
+  </Step>
+</Steps>
+
+## Step 6: Testing the Paywall
+
+### Start the Server
+
+```bash
+npm run dev
+```
+
+### Test Without Payment (Expect 402)
+
+```bash
+curl -i -H "Accept: application/json" "http://localhost:3100/weather?city=Tokyo"
+```
+
+You should see:
+```
+HTTP/1.1 402 Payment Required
+```
+
+### Generate Payment Header
+
+To actually pay and access the endpoint, you need an x402 client. The simplest way is to use the payment header generator from the `ping` example:
+
+<CodeGroup>
+```bash Install x402 Client
+cd ..
+git clone https://github.com/crossmint/crossmint-agentic-finance.git
+cd crossmint-agentic-finance/ping
+npm install
+```
+
+```bash Configure Payer
+# Create .env in the ping directory
+PRIVATE_KEY=0xYourPrivateKeyHere
+TARGET_URL=http://localhost:3100/weather?city=Tokyo
+```
+
+```bash Generate Header
+npm run payment:header
+# Outputs: <long-base64-string>
+```
+
+```bash Use Header
+HEADER=$(npm run -s payment:header)
+curl -i -H "X-PAYMENT: $HEADER" "http://localhost:3100/weather?city=Tokyo"
+```
+</CodeGroup>
+
+Now you should see the weather data!
+
+## Step 7: Production Enhancements
+
+### Add Rate Limiting
+
+```typescript
+import rateLimit from "express-rate-limit";
+
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // 100 requests per window
+  message: "Too many requests, please try again later"
+});
+
+app.use("/weather", limiter);
+```
+
+### Add Logging
+
+```typescript
+import morgan from "morgan";
+
+app.use(morgan("combined"));
+
+// Custom payment logging
+app.use((req, res, next) => {
+  const paymentHeader = req.headers["x-payment"];
+  if (paymentHeader) {
+    console.log(`💰 Payment received for ${req.method} ${req.path}`);
+  }
+  next();
+});
+```
+
+### Add CORS
+
+```typescript
+import cors from "cors";
+
+app.use(cors({
+  origin: process.env.ALLOWED_ORIGINS?.split(",") || "*",
+  credentials: true
+}));
+```
+
+### Error Handling
+
+```typescript
+app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
+  console.error("Error:", err);
+  
+  res.status(500).json({
+    error: "Internal server error",
+    message: process.env.NODE_ENV === "development" ? err.message : undefined
+  });
+});
+```
+
+## Step 8: Deploy to Production
+
+<Tabs>
+  <Tab title="Railway">
+    ```bash
+    # Install Railway CLI
+    npm i -g @railway/cli
+    
+    # Login and deploy
+    railway login
+    railway init
+    railway up
+    
+    # Set environment variables
+    railway variables set PAY_TO=0xYourAddress
+    railway variables set NETWORK=base
+    ```
+  </Tab>
+  
+  <Tab title="Render">
+    1. Push code to GitHub
+    2. Create new Web Service on Render
+    3. Connect repository
+    4. Set build command: `npm run build`
+    5. Set start command: `npm start`
+    6. Add environment variables:
+       - `PAY_TO`: Your wallet address
+       - `NETWORK`: `base` (for mainnet)
+  </Tab>
+  
+  <Tab title="Fly.io">
+    ```bash
+    # Install Fly CLI
+    curl -L https://fly.io/install.sh | sh
+    
+    # Launch app
+    fly launch
+    
+    # Set secrets
+    fly secrets set PAY_TO=0xYourAddress
+    fly secrets set NETWORK=base
+    
+    # Deploy
+    fly deploy
+    ```
+  </Tab>
+</Tabs>
+
+### Switching to Mainnet
+
+Before production deployment:
+
+1. **Update network**: Change `NETWORK=base-sepolia` to `NETWORK=base`
+2. **Update USDC address**: The middleware will use the correct USDC contract for Base mainnet
+3. **Test with small amounts**: Start with $0.001 payments to verify everything works
+4. **Monitor transactions**: Use [Basescan](https://basescan.org) to track payments
+
+## Advanced: Multiple Endpoints
+
+You can protect multiple endpoints with different prices:
+
+```typescript
+app.use(paymentMiddleware(payTo, {
+  "GET /weather": { price: "$0.001", network },
+  "GET /forecast": { price: "$0.005", network },
+  "GET /alerts": { price: "$0.010", network },
+  "POST /subscribe": { price: "$1.00", network }
+}));
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="402 response but no payment details">
+    Check that you're sending `Accept: application/json` header. Without it, you'll get an HTML paywall page instead of JSON.
+  </Accordion>
+
+  <Accordion title="Payment verification failed">
+    Common causes:
+    - Wrong network (testnet vs mainnet)
+    - Insufficient USDC balance
+    - Invalid signature
+    - Facilitator is down
+    
+    Check the `X-PAYMENT-RESPONSE` header for error details.
+  </Accordion>
+
+  <Accordion title="CORS errors in browser">
+    Add CORS middleware:
+    ```typescript
+    import cors from "cors";
+    app.use(cors());
+    ```
+  </Accordion>
+
+  <Accordion title="Payments not appearing in wallet">
+    - Check the correct network on block explorer
+    - Verify `PAY_TO` address is correct
+    - Wait for transaction finality (2-3 seconds on Base)
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Autonomous Agent" icon="robot" href="/tutorials/autonomous-agent">
+    Build an AI agent that automatically pays for API access
+  </Card>
+  <Card title="Durable Objects" icon="database" href="/tutorials/durable-objects">
+    Learn stateful agent patterns with Cloudflare
+  </Card>
+  <Card title="x402 Protocol" icon="book" href="/concepts/x402-protocol">
+    Deep dive into HTTP payment protocol
+  </Card>
+  <Card title="Smart Wallets" icon="wallet" href="/concepts/smart-wallets">
+    Understand Crossmint wallet integration
+  </Card>
+</CardGroup>
+
+## Full Code
+
+View the complete example: [weather-402 on GitHub](https://github.com/crossmint/crossmint-agentic-finance/tree/main/weather)

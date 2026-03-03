@@ -1,0 +1,308 @@
+---
+title: "Prerequisites"
+description: "Set up your development environment for Crossmint Agentic Finance"
+---
+
+## Required Software
+
+<AccordionGroup>
+  <Accordion title="Node.js and npm" icon="node-js">
+    All examples require **Node.js 18.17.0 or higher** and **npm 9.0.0 or higher**.
+    
+    Check your versions:
+    ```bash
+    node --version  # Should be v18.17.0 or higher
+    npm --version   # Should be 9.0.0 or higher
+    ```
+    
+    Install or update Node.js:
+    - **macOS/Linux**: Use [nvm](https://github.com/nvm-sh/nvm)
+      ```bash
+      nvm install 18
+      nvm use 18
+      ```
+    - **Windows**: Download from [nodejs.org](https://nodejs.org/)
+  </Accordion>
+
+  <Accordion title="Git" icon="git">
+    Required to clone the repository:
+    ```bash
+    git --version
+    ```
+    
+    Install Git from [git-scm.com](https://git-scm.com/) if needed.
+  </Accordion>
+
+  <Accordion title="Code Editor" icon="code">
+    Recommended editors:
+    - **VS Code** with TypeScript extensions
+    - **WebStorm** or other JetBrains IDEs
+    - **Cursor** for AI-assisted development
+  </Accordion>
+</AccordionGroup>
+
+## Crossmint API Key
+
+Some examples (particularly those using Crossmint smart wallets) require a Crossmint API key.
+
+<Steps>
+  <Step title="Sign up for Crossmint">
+    Visit the [Crossmint Console](https://www.crossmint.com/console) and create an account.
+  </Step>
+
+  <Step title="Get your API key">
+    In the console, navigate to **API Keys** and create a new key for development.
+    
+    <Warning>
+      Keep your API key secret. Never commit it to version control or share it publicly.
+    </Warning>
+  </Step>
+
+  <Step title="Configure environment">
+    Add your API key to the `.env` file in the demo you're running:
+    ```bash .env
+    CROSSMINT_API_KEY=your_api_key_here
+    ```
+  </Step>
+</Steps>
+
+<Note>
+  The basic demos ([ping](/paywalls/ping), [weather](/paywalls/weather)) don't require a Crossmint API key. Start with those if you want to explore without signing up.
+</Note>
+
+## Blockchain Prerequisites
+
+### Testnet USDC Tokens
+
+All demos use **testnet USDC** on either Base Sepolia or Solana Devnet. You'll need testnet tokens to:
+- Make payments as a client/agent
+- Receive payments as a service provider
+- Test settlement verification
+
+<Steps>
+  <Step title="Get Base Sepolia USDC">
+    Use the Circle testnet faucet:
+    
+    1. Visit [faucet.circle.com](https://faucet.circle.com/)
+    2. Select **Base Sepolia** network
+    3. Enter your wallet address
+    4. Request testnet USDC (you'll receive ~10 USDC)
+    
+    <Tip>
+      You can request tokens once per day per address.
+    </Tip>
+  </Step>
+
+  <Step title="Get Solana Devnet USDC (if needed)">
+    For Solana demos, use the Circle faucet:
+    
+    1. Visit [faucet.circle.com](https://faucet.circle.com/)
+    2. Select **Solana Devnet** network
+    3. Enter your Solana wallet address
+    4. Request testnet USDC
+  </Step>
+
+  <Step title="Verify your balance">
+    For Base Sepolia, check your balance on [Basescan Sepolia](https://sepolia.basescan.org/).
+    
+    For Solana, use [Solana Explorer (Devnet)](https://explorer.solana.com/?cluster=devnet).
+  </Step>
+</Steps>
+
+### Wallet Setup
+
+<Tabs>
+  <Tab title="EVM Wallets (Base)">
+    For EVM-based demos, you need a wallet on Base Sepolia:
+    
+    **Option 1: MetaMask**
+    1. Install [MetaMask](https://metamask.io/)
+    2. Add Base Sepolia network:
+       - Network Name: `Base Sepolia`
+       - RPC URL: `https://sepolia.base.org`
+       - Chain ID: `84532`
+       - Currency Symbol: `ETH`
+       - Block Explorer: `https://sepolia.basescan.org`
+    3. Get testnet ETH from [Base Sepolia faucet](https://www.coinbase.com/faucets/base-ethereum-sepolia-faucet) for gas
+    
+    **Option 2: Private Key**
+    Generate a new wallet for testing:
+    ```bash
+    # Using cast (from Foundry)
+    cast wallet new
+    
+    # Or using Node.js
+    node -e "console.log(require('ethers').Wallet.createRandom().privateKey)"
+    ```
+    
+    <Warning>
+      Only use test wallets with testnet tokens. Never use your main wallet's private key.
+    </Warning>
+  </Tab>
+
+  <Tab title="Solana Wallets">
+    For Solana demos:
+    
+    **Option 1: Phantom Wallet**
+    1. Install [Phantom](https://phantom.app/)
+    2. Switch to **Devnet** in settings
+    3. Get testnet SOL from [Solana faucet](https://faucet.solana.com/) for fees
+    
+    **Option 2: CLI Keypair**
+    Generate a keypair using Solana CLI:
+    ```bash
+    solana-keygen new --outfile ~/.config/solana/devnet.json
+    ```
+  </Tab>
+
+  <Tab title="Crossmint Smart Wallets">
+    Crossmint smart wallets are created automatically via the SDK:
+    
+    - **No setup required** - wallets are created on-demand
+    - **Gasless transactions** - no ETH or SOL needed for gas
+    - **Email-based** - wallets can be linked to user emails
+    
+    See the [ping-crossmint demo](/paywalls/ping-crossmint) for implementation details.
+  </Tab>
+</Tabs>
+
+## Understanding Key Terms
+
+Before diving into the demos, familiarize yourself with these concepts:
+
+<AccordionGroup>
+  <Accordion title="x402 Protocol" icon="hand-holding-dollar">
+    **x402** is an HTTP payment protocol using the `402 Payment Required` status code.
+    
+    - Server returns `402` with payment requirements when a resource needs payment
+    - Client generates a payment authorization header (`X-PAYMENT`)
+    - Server verifies the payment and grants access
+    
+    Learn more in [x402 Protocol Concepts](/concepts/x402-protocol)
+  </Accordion>
+
+  <Accordion title="A2A (Agent-to-Agent)" icon="users">
+    **A2A** is a protocol for AI agents to communicate and transact autonomously.
+    
+    - Agents discover each other's capabilities and pricing
+    - Payments are made programmatically without human intervention
+    - Enables agent-to-agent marketplaces and service networks
+    
+    Learn more in [A2A Payments](/concepts/a2a-payments)
+  </Accordion>
+
+  <Accordion title="EOA (Externally Owned Account)" icon="wallet">
+    An **EOA** is a traditional blockchain wallet controlled by a private key.
+    
+    - User has full control via private key
+    - Requires gas tokens (ETH, SOL) for transactions
+    - Compatible with all standard wallets (MetaMask, Phantom, etc.)
+    
+    Most basic demos use EOA wallets for simplicity.
+  </Accordion>
+
+  <Accordion title="Smart Wallets" icon="microchip">
+    **Smart wallets** (also called smart contract wallets) are programmable wallets.
+    
+    - Can execute complex logic (spending limits, multi-sig, etc.)
+    - Crossmint smart wallets support **gasless transactions**
+    - Enable features like email-based recovery and session keys
+    
+    Learn more in [Smart Wallets Concepts](/concepts/smart-wallets)
+  </Accordion>
+
+  <Accordion title="MCP (Model Context Protocol)" icon="plug">
+    **MCP** is a standard for integrating tools with AI models.
+    
+    - Allows AI agents to discover and use external tools
+    - Payment-gated MCP tools enable autonomous agent economies
+    - Used in advanced demos like [events-concierge](/a2a/events-concierge)
+    
+    Learn more at [modelcontextprotocol.org](https://modelcontextprotocol.io/)
+  </Accordion>
+
+  <Accordion title="USDC" icon="dollar-sign">
+    **USDC** (USD Coin) is a stablecoin pegged 1:1 to the US Dollar.
+    
+    - All demos use USDC for payments (not ETH or SOL)
+    - Testnet USDC has no real value and is free from faucets
+    - Production systems use mainnet USDC for real payments
+    
+    Token addresses:
+    - Base Sepolia: `0x036CbD53842c5426634e7929541eC2318f3dCF7e`
+    - Solana Devnet: `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU`
+  </Accordion>
+</AccordionGroup>
+
+## Development Tools (Optional)
+
+These tools can enhance your development experience:
+
+<CardGroup cols={2}>
+  <Card title="Foundry" icon="anvil" href="https://getfoundry.sh/">
+    EVM development toolkit with `cast` for wallet operations
+  </Card>
+  
+  <Card title="Solana CLI" icon="terminal" href="https://docs.solana.com/cli">
+    Command-line tools for Solana development
+  </Card>
+  
+  <Card title="Thunder Client" icon="bolt" href="https://www.thunderclient.com/">
+    VS Code extension for testing HTTP endpoints
+  </Card>
+  
+  <Card title="Postman" icon="paper-plane" href="https://www.postman.com/">
+    API testing tool with support for custom headers
+  </Card>
+</CardGroup>
+
+## Verification Checklist
+
+Before starting the demos, ensure you have:
+
+<Steps>
+  <Step title="Software installed">
+    - [ ] Node.js 18.17.0+
+    - [ ] npm 9.0.0+
+    - [ ] Git
+  </Step>
+
+  <Step title="Accounts created">
+    - [ ] Crossmint account (optional for basic demos)
+    - [ ] Wallet on Base Sepolia or Solana Devnet
+  </Step>
+
+  <Step title="Tokens acquired">
+    - [ ] Testnet USDC from Circle faucet
+    - [ ] Testnet ETH or SOL for gas (if using EOA wallets)
+  </Step>
+
+  <Step title="Ready to code">
+    - [ ] Repository cloned: `git clone https://github.com/crossmint/crossmint-agentic-finance.git`
+    - [ ] Environment variables configured
+  </Step>
+</Steps>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Run your first paywall server in 5 minutes
+  </Card>
+  
+  <Card title="x402 Protocol" icon="book" href="/concepts/x402-protocol">
+    Learn how the payment protocol works
+  </Card>
+  
+  <Card title="HTTP Paywalls" icon="server" href="/paywalls/ping">
+    Build payment-protected API endpoints
+  </Card>
+  
+  <Card title="Agent-to-Agent" icon="users" href="/a2a/hello-eoa">
+    Create autonomous payment agents
+  </Card>
+</CardGroup>
+
+<Note>
+  **Need help?** Join the [Crossmint Discord](https://discord.gg/crossmint) or check the [GitHub discussions](https://github.com/Crossmint/crossmint-agentic-finance/discussions).
+</Note>

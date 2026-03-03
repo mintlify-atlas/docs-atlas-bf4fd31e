@@ -1,0 +1,335 @@
+---
+title: '@crossmint/wallets-sdk'
+description: 'Create and manage Crossmint smart wallets for AI agents'
+---
+
+## Overview
+
+The `@crossmint/wallets-sdk` provides smart wallet functionality for AI agents in the Agentic Finance platform. Crossmint wallets are smart contract wallets that support ERC-6492 pre-deployment signatures and work seamlessly with the x402 payment protocol.
+
+## Installation
+
+```bash
+npm install @crossmint/wallets-sdk
+```
+
+## Core Concepts
+
+### Wallet Types
+
+- **Smart Contract Wallets**: Crossmint creates smart contract wallets that can be pre-deployed (ERC-6492) or fully deployed on-chain
+- **API Key Signer**: Wallets use API key-based signing for autonomous agent operation
+- **Multi-chain Support**: Supports Base Sepolia and other EVM chains
+
+### Wallet States
+
+1. **Pre-deployed**: Wallet exists but contract is not yet deployed on-chain (uses ERC-6492 signatures)
+2. **Deployed**: Wallet contract is deployed on-chain (uses EIP-1271 signatures)
+
+## Creating a Crossmint Client
+
+### Basic Setup
+
+```typescript
+import { createCrossmint, CrossmintWallets } from '@crossmint/wallets-sdk';
+
+const crossmint = createCrossmint({
+  apiKey: process.env.CROSSMINT_API_KEY
+});
+
+const crossmintWallets = CrossmintWallets.from(crossmint);
+```
+
+## Creating Wallets
+
+### Create a Wallet with API Key Signer
+
+```typescript
+const wallet = await crossmintWallets.createWallet({
+  chain: "base-sepolia",
+  signer: { type: "api-key" },
+  owner: "userId:my-app:user-123"
+});
+
+console.log("Wallet address:", wallet.address);
+```
+
+### Wallet Locator Pattern
+
+Use consistent locators to ensure the same wallet is retrieved:
+
+```typescript
+// Guest agent - consistent wallet per user
+const GUEST_WALLET_LOCATOR = "userId:crossmint-merchant-guest:demo-user";
+
+const guestWallet = await crossmintWallets.createWallet({
+  chain: "base-sepolia",
+  signer: { type: "api-key" },
+  owner: GUEST_WALLET_LOCATOR
+});
+
+// Host agent - wallet per host user
+const hostWallet = await crossmintWallets.createWallet({
+  chain: "base-sepolia",
+  signer: { type: "api-key" },
+  owner: `userId:crossmint-merchant-host:${userScopeId}`
+});
+```
+
+## EVM Wallet Operations
+
+### Converting to EVMWallet
+
+```typescript
+import { EVMWallet } from '@crossmint/wallets-sdk';
+
+const evmWallet = EVMWallet.from(wallet);
+
+console.log("EVM address:", evmWallet.address);
+console.log("Chain:", evmWallet.chain);
+```
+
+### Signing Typed Data
+
+Sign EIP-712 typed data for payment authorizations:
+
+```typescript
+const signature = await evmWallet.signTypedData({
+  domain: {
+    name: "X402",
+    version: "1",
+    chainId: 84532,
+    verifyingContract: "0x..."
+  },
+  message: {
+    from: evmWallet.address,
+    to: "0x...",
+    maxAmount: "1000000", // 1 USDC
+    nonce: 1
+  },
+  primaryType: "Payment",
+  types: {
+    Payment: [
+      { name: "from", type: "address" },
+      { name: "to", type: "address" },
+      { name: "maxAmount", type: "uint256" },
+      { name: "nonce", type: "uint256" }
+    ]
+  },
+  chain: evmWallet.chain as any
+});
+
+console.log("Signature:", signature.signature);
+```
+
+### Sending Transactions
+
+```typescript
+// Send a transaction
+const tx = await evmWallet.sendTransaction({
+  to: "0xRecipientAddress",
+  value: 1000000n, // 0.001 ETH in wei
+  data: "0x"
+});
+
+console.log("Transaction hash:", tx.hash);
+```
+
+### Deploy Pre-deployed Wallet
+
+Deploy a pre-deployed wallet with a minimal self-transfer:
+
+```typescript
+const deploymentTx = await evmWallet.sendTransaction({
+  to: wallet.address,
+  value: 1n, // 1 wei
+  data: "0x"
+});
+
+console.log("Wallet deployed:", deploymentTx.hash);
+```
+
+## Complete Examples
+
+### Guest Agent Wallet Setup
+
+From `events-concierge/src/agents/guest.ts:91-113`:
+
+```typescript
+import { CrossmintWallets, createCrossmint, type Wallet } from '@crossmint/wallets-sdk';
+
+class Guest {
+  wallet!: Wallet<any>;
+  
+  async onStart() {
+    // Initialize Crossmint SDK and create wallet with API key signer
+    const crossmint = createCrossmint({
+      apiKey: this.env.CROSSMINT_API_KEY
+    });
+    const crossmintWallets = CrossmintWallets.from(crossmint);
+
+    // Create or get wallet using consistent locator
+    const locator = "userId:crossmint-merchant-guest:demo-user";
+    this.wallet = await crossmintWallets.createWallet({
+      chain: "base-sepolia",
+      signer: { type: "api-key" },
+      owner: locator
+    });
+
+    console.log(`Guest wallet ready: ${this.wallet.address}`);
+  }
+}
+```
+
+### Host Agent Wallet Setup
+
+From `events-concierge/src/agents/host.ts:241-265`:
+
+```typescript
+import { CrossmintWallets, createCrossmint, type Wallet } from '@crossmint/wallets-sdk';
+
+class Host {
+  wallet!: Wallet<any>;
+  
+  async init() {
+    // Create host wallet for receiving payments
+    const crossmint = createCrossmint({
+      apiKey: this.env.CROSSMINT_API_KEY
+    });
+    const crossmintWallets = CrossmintWallets.from(crossmint);
+
+    this.wallet = await crossmintWallets.createWallet({
+      chain: "base-sepolia",
+      signer: { type: "api-key" },
+      owner: `userId:crossmint-merchant-host:${this.userScopeId}`
+    });
+
+    const recipient = this.wallet.address as `0x${string}`;
+
+    // Store wallet address in KV
+    await this.env.SECRETS.put(
+      `usersByHash:${this.userScopeId}`,
+      JSON.stringify({ walletAddress: recipient, userId: this.userScopeId })
+    );
+
+    console.log(`Host wallet created: ${recipient}`);
+  }
+}
+```
+
+## Type Definitions
+
+### Wallet Interface
+
+```typescript
+interface Wallet<T> {
+  address: string;
+  chain: string;
+  // Additional properties specific to wallet type
+}
+```
+
+### EVMWallet Methods
+
+```typescript
+class EVMWallet {
+  address: string;
+  chain: string;
+  
+  static from(wallet: Wallet<any>): EVMWallet;
+  
+  signTypedData(params: {
+    domain: any;
+    message: any;
+    primaryType: string;
+    types: any;
+    chain: any;
+  }): Promise<{ signature: string }>;
+  
+  sendTransaction(params: {
+    to: string;
+    value: bigint;
+    data: string;
+  }): Promise<{ hash: string }>;
+}
+```
+
+## Best Practices
+
+### Use Consistent Locators
+
+Always use consistent owner locators to ensure the same wallet is retrieved:
+
+```typescript
+// Good: Deterministic locator
+const locator = `userId:my-app:${userId}`;
+
+// Bad: Random locator
+const locator = `userId:my-app:${Math.random()}`;
+```
+
+### Handle Wallet Deployment
+
+Check if a wallet is deployed before making payments:
+
+```typescript
+import { createPublicClient, http } from 'viem';
+import { baseSepolia } from 'viem/chains';
+
+async function checkWalletDeployment(walletAddress: string): Promise<boolean> {
+  const publicClient = createPublicClient({
+    chain: baseSepolia,
+    transport: http("https://sepolia.base.org")
+  });
+
+  const code = await publicClient.getCode({
+    address: walletAddress as `0x${string}`
+  });
+
+  return code !== undefined && code !== '0x' && code.length > 2;
+}
+```
+
+### Deploy Before Settlement
+
+For x402 payments, deploy pre-deployed wallets before settlement:
+
+```typescript
+const isDeployed = await checkWalletDeployment(wallet.address);
+
+if (!isDeployed) {
+  console.log("Deploying wallet...");
+  const evmWallet = EVMWallet.from(wallet);
+  
+  await evmWallet.sendTransaction({
+    to: wallet.address,
+    value: 1n,
+    data: "0x"
+  });
+  
+  console.log("Wallet deployed!");
+}
+```
+
+## Error Handling
+
+### Insufficient Balance
+
+```typescript
+try {
+  await evmWallet.sendTransaction({ to, value, data });
+} catch (error) {
+  const errorMsg = error instanceof Error ? error.message : String(error);
+  
+  if (errorMsg.includes('insufficient') || errorMsg.includes('balance')) {
+    throw new Error("Insufficient ETH balance for gas fees");
+  }
+  
+  throw error;
+}
+```
+
+## See Also
+
+- [x402Adapter](/api/crossmint-adapter) - Convert Crossmint wallets to viem accounts
+- [Crossmint Documentation](https://docs.crossmint.com) - Official Crossmint docs

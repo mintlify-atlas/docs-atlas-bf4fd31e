@@ -1,0 +1,604 @@
+---
+title: 'x402Adapter'
+description: 'Convert Crossmint wallets to viem-compatible accounts for x402 payments'
+---
+
+## Overview
+
+The x402Adapter creates a viem LocalAccount-compatible interface from Crossmint wallets, enabling seamless integration with the x402 payment protocol. The adapter handles signature processing for ERC-6492 (pre-deployed), EIP-1271 (deployed), and standard ECDSA signatures.
+
+## Installation
+
+The adapter is typically implemented as a local module in your project:
+
+```typescript
+// src/x402Adapter.ts
+```
+
+## Core Functions
+
+### createX402Signer
+
+Converts a Crossmint wallet to an x402-compatible signer.
+
+#### Basic Usage
+
+```typescript
+import { createX402Signer } from './x402Adapter';
+import { EVMWallet } from '@crossmint/wallets-sdk';
+import type { Wallet } from '@crossmint/wallets-sdk';
+
+const wallet: Wallet<any> = /* your Crossmint wallet */;
+const x402Signer = createX402Signer(wallet);
+
+console.log("Signer address:", x402Signer.account.address);
+```
+
+#### Implementation (events-concierge)
+
+From `events-concierge/src/x402Adapter.ts:14-73`:
+
+```typescript
+import type { Wallet } from "@crossmint/wallets-sdk";
+import { EVMWallet } from "@crossmint/wallets-sdk";
+import type { Hex } from "viem";
+
+export function createX402Signer(wallet: Wallet<any>) {
+  const evm = EVMWallet.from(wallet);
+
+  console.log("Creating x402 account:", {
+    walletAddress: wallet.address,
+    evmAddress: evm.address,
+    addressType: typeof evm.address
+  });
+
+  // Create viem Account-compatible object
+  // x402 expects an Account with address, type, and signTypedData method
+  const account: any = {
+    address: evm.address as `0x${string}`,
+    type: "local",
+    source: "custom",
+
+    // signTypedData method required by x402 for payment signatures
+    signTypedData: async (params: any) => {
+      console.log("signTypedData called for address:", evm.address);
+      const { domain, message, primaryType, types } = params;
+
+      console.log("Full EIP-712 payload being signed:");
+      console.log("  Domain:", JSON.stringify(domain, null, 2));
+      console.log("  Message:", JSON.stringify(message, null, 2));
+      console.log("  PrimaryType:", primaryType);
+      console.log("  Types:", JSON.stringify(types, null, 2));
+
+      console.log("Key fields:");
+      console.log("  - Payer (from):", evm.address);
+      console.log("  - Recipient (to):", message?.to || message?.recipient || message?.payTo || 'MISSING');
+      console.log("  - Verifying contract:", domain?.verifyingContract);
+
+      // Sign with Crossmint wallet
+      console.log("Calling Crossmint signTypedData...");
+      const sig = await evm.signTypedData({
+        domain,
+        message,
+        primaryType,
+        types,
+        chain: evm.chain as any
+      } as any);
+
+      console.log("Signature received from Crossmint");
+      console.log("Signature details:", {
+        signatureLength: sig.signature.length,
+        signatureStart: sig.signature.substring(0, 66),
+        isERC6492: sig.signature.endsWith("6492649264926492649264926492649264926492649264926492649264926492")
+      });
+
+      const processed = processSignature(sig.signature as string);
+      console.log("Processed signature ready for x402 facilitator");
+
+      return processed;
+    }
+  };
+
+  console.log("x402 account created with address:", account.address);
+
+  return account;
+}
+```
+
+#### Implementation (cloudflare-agents)
+
+From `cloudflare-agents/src/x402Adapter.ts:14-68`:
+
+```typescript
+import type { Wallet } from "@crossmint/wallets-sdk";
+import { EVMWallet } from "@crossmint/wallets-sdk";
+import type { LocalAccount, Hex } from "viem";
+
+export function createX402Signer(wallet: Wallet<any>) {
+  const evm = EVMWallet.from(wallet);
+
+  // Create x402-compatible signer with viem wallet client structure
+  // Must have account, chain, and transport properties for x402 to recognize it as SignerWallet
+  const signer: any = {
+    account: {
+      address: evm.address,
+      type: "local",
+      source: "custom"
+    },
+    chain: {
+      id: 84532, // Base Sepolia chain ID
+      name: "Base Sepolia",
+      network: "base-sepolia",
+      nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+      rpcUrls: {
+        default: { http: ["https://base-sepolia.g.alchemy.com/v2/m8uZ16oNz2KOgSqu-9Pv6E1fkc69n8Xf"] },
+        public: { http: ["https://base-sepolia.g.alchemy.com/v2/m8uZ16oNz2KOgSqu-9Pv6E1fkc69n8Xf"] }
+      }
+    },
+    transport: {
+      type: "http",
+      url: "https://sepolia.base.org"
+    },
+
+    async signTypedData(params: any) {
+      const { domain, message, primaryType, types } = params;
+
+      console.log("Signing x402 payment:", {
+        from: evm.address,
+        to: domain.verifyingContract,
+        primaryType
+      });
+
+      // Sign with Crossmint wallet
+      const sig = await evm.signTypedData({
+        domain,
+        message,
+        primaryType,
+        types,
+        chain: evm.chain as any
+      } as any);
+
+      console.log("Raw signature from Crossmint:", {
+        signatureLength: sig.signature.length,
+        signatureStart: sig.signature.substring(0, 66)
+      });
+
+      return processSignature(sig.signature as string);
+    }
+  };
+
+  return signer;
+}
+```
+
+## Signature Processing
+
+### processSignature
+
+Normalizes signatures for x402 compatibility, handling multiple signature formats.
+
+From `events-concierge/src/x402Adapter.ts:75-111`:
+
+```typescript
+function processSignature(rawSignature: string): Hex {
+  const signature = ensureHexPrefix(rawSignature);
+
+  console.log(`Processing signature: ${signature.substring(0, 20)}... (${signature.length} chars)`);
+
+  // Handle ERC-6492 wrapped signatures (for pre-deployed wallets)
+  if (isERC6492Signature(signature)) {
+    console.log("ERC-6492 signature detected - keeping for facilitator");
+    return signature;
+  }
+
+  // Handle EIP-1271 signatures (for deployed smart contract wallets)
+  if (signature.length === 174) {
+    console.log("EIP-1271 signature detected");
+    return signature;
+  }
+
+  // Handle standard ECDSA signatures (65 bytes / 132 hex chars)
+  if (signature.length === 132) {
+    console.log("Standard ECDSA signature");
+    return signature;
+  }
+
+  // Handle non-standard lengths - try to extract standard signature
+  if (signature.length > 132) {
+    const extracted = '0x' + signature.slice(-130);
+    console.log(`Extracted standard signature from longer format`);
+    return extracted as Hex;
+  }
+
+  console.log("Using signature as-is");
+  return signature;
+}
+```
+
+### Signature Format Detection
+
+#### ERC-6492 Signatures
+
+Pre-deployed smart contract wallets use ERC-6492 wrapped signatures:
+
+```typescript
+function isERC6492Signature(signature: string): boolean {
+  return signature.endsWith("6492649264926492649264926492649264926492649264926492649264926492");
+}
+```
+
+#### Hex Prefix Normalization
+
+```typescript
+function ensureHexPrefix(signature: string): Hex {
+  return (signature.startsWith('0x') ? signature : `0x${signature}`) as Hex;
+}
+```
+
+## Wallet Deployment
+
+### checkWalletDeployment
+
+Checks if a wallet contract is deployed on-chain.
+
+From `events-concierge/src/x402Adapter.ts:131-154`:
+
+```typescript
+export async function checkWalletDeployment(
+  walletAddress: string,
+  chain: string
+): Promise<boolean> {
+  try {
+    const { createPublicClient, http } = await import("viem");
+    const { baseSepolia } = await import("viem/chains");
+
+    const publicClient = createPublicClient({
+      chain: baseSepolia,
+      transport: http("https://sepolia.base.org")
+    });
+
+    const code = await publicClient.getCode({
+      address: walletAddress as `0x${string}`
+    });
+
+    // If bytecode exists and is not just "0x", the wallet is deployed
+    return code !== undefined && code !== '0x' && code.length > 2;
+  } catch (error) {
+    console.error('Failed to check wallet deployment:', error);
+    return false;
+  }
+}
+```
+
+### deployWallet
+
+Deploys a pre-deployed wallet with a minimal self-transfer.
+
+From `events-concierge/src/x402Adapter.ts:159-185`:
+
+```typescript
+export async function deployWallet(wallet: Wallet<any>): Promise<string> {
+  console.log("Deploying wallet on-chain...");
+
+  try {
+    const { EVMWallet } = await import("@crossmint/wallets-sdk");
+    const evmWallet = EVMWallet.from(wallet);
+
+    // Deploy wallet with a minimal self-transfer (1 wei)
+    const deploymentTx = await evmWallet.sendTransaction({
+      to: wallet.address,
+      value: 1n, // 1 wei
+      data: "0x"
+    });
+
+    console.log(`Wallet deployed! Transaction: ${deploymentTx.hash}`);
+    return deploymentTx.hash || `deployment_tx_${Date.now()}`;
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    console.error("Deployment error:", error);
+
+    if (errorMsg.includes('insufficient') || errorMsg.includes('balance')) {
+      throw new Error("Insufficient ETH balance for deployment gas fees");
+    }
+
+    throw new Error(`Wallet deployment failed: ${errorMsg}`);
+  }
+}
+```
+
+## Integration with x402 Client
+
+### Guest Agent Example
+
+From `events-concierge/src/agents/guest.ts:269-285`:
+
+```typescript
+import { withX402Client } from "agents/x402";
+import { createX402Signer } from "../x402Adapter";
+
+class Guest {
+  async connectToMCP(mcpUrl: string) {
+    // Create x402 signer from Crossmint wallet
+    const x402Signer = createX402Signer(this.wallet);
+
+    // Build x402 client
+    this.x402Client = withX402Client(this.mcp.mcpConnections[id].client, {
+      network: "base-sepolia",
+      account: x402Signer
+    });
+
+    console.log("x402 client ready with wallet:", this.wallet.address);
+  }
+}
+```
+
+### Payment Workflow
+
+```typescript
+// 1. Check wallet deployment status
+const isDeployed = await checkWalletDeployment(wallet.address, "base-sepolia");
+
+if (!isDeployed) {
+  console.log("Wallet is pre-deployed (ERC-6492 mode)");
+  console.log("Deploying wallet for settlement...");
+  
+  // 2. Deploy wallet before payment
+  const deploymentTxHash = await deployWallet(wallet);
+  console.log("Wallet deployed:", deploymentTxHash);
+}
+
+// 3. Create x402 signer
+const x402Signer = createX402Signer(wallet);
+
+// 4. Make payment with x402 client
+const result = await x402Client.callTool(
+  onPaymentRequired,
+  {
+    name: "paidTool",
+    arguments: {}
+  }
+);
+
+console.log("Payment successful:", result);
+```
+
+## Complete Example
+
+### Full x402Adapter Implementation
+
+```typescript
+import type { Wallet } from "@crossmint/wallets-sdk";
+import { EVMWallet } from "@crossmint/wallets-sdk";
+import type { Hex } from "viem";
+
+/**
+ * Create an x402-compatible Account from a Crossmint wallet
+ * Returns a viem Account-compatible object that x402 can use
+ */
+export function createX402Signer(wallet: Wallet<any>) {
+  const evm = EVMWallet.from(wallet);
+
+  const account: any = {
+    address: evm.address as `0x${string}`,
+    type: "local",
+    source: "custom",
+
+    signTypedData: async (params: any) => {
+      const { domain, message, primaryType, types } = params;
+
+      // Sign with Crossmint wallet
+      const sig = await evm.signTypedData({
+        domain,
+        message,
+        primaryType,
+        types,
+        chain: evm.chain as any
+      } as any);
+
+      return processSignature(sig.signature as string);
+    }
+  };
+
+  return account;
+}
+
+function processSignature(rawSignature: string): Hex {
+  const signature = ensureHexPrefix(rawSignature);
+
+  // Handle ERC-6492 wrapped signatures
+  if (isERC6492Signature(signature)) {
+    return signature;
+  }
+
+  // Handle EIP-1271 signatures (174 chars)
+  if (signature.length === 174) {
+    return signature;
+  }
+
+  // Handle standard ECDSA signatures (132 chars)
+  if (signature.length === 132) {
+    return signature;
+  }
+
+  // Extract standard signature from longer format
+  if (signature.length > 132) {
+    return ('0x' + signature.slice(-130)) as Hex;
+  }
+
+  return signature;
+}
+
+function ensureHexPrefix(signature: string): Hex {
+  return (signature.startsWith('0x') ? signature : `0x${signature}`) as Hex;
+}
+
+function isERC6492Signature(signature: string): boolean {
+  return signature.endsWith("6492649264926492649264926492649264926492649264926492649264926492");
+}
+
+export async function checkWalletDeployment(
+  walletAddress: string,
+  chain: string
+): Promise<boolean> {
+  const { createPublicClient, http } = await import("viem");
+  const { baseSepolia } = await import("viem/chains");
+
+  const publicClient = createPublicClient({
+    chain: baseSepolia,
+    transport: http("https://sepolia.base.org")
+  });
+
+  const code = await publicClient.getCode({
+    address: walletAddress as `0x${string}`
+  });
+
+  return code !== undefined && code !== '0x' && code.length > 2;
+}
+
+export async function deployWallet(wallet: Wallet<any>): Promise<string> {
+  const evmWallet = EVMWallet.from(wallet);
+
+  const deploymentTx = await evmWallet.sendTransaction({
+    to: wallet.address,
+    value: 1n,
+    data: "0x"
+  });
+
+  return deploymentTx.hash || `deployment_tx_${Date.now()}`;
+}
+```
+
+## Signature Formats Reference
+
+### ERC-6492 (Pre-deployed Wallets)
+
+- **Length**: Variable (typically >132 chars)
+- **Magic Suffix**: `6492649264926492649264926492649264926492649264926492649264926492`
+- **Use Case**: Smart contract wallets that haven't been deployed yet
+- **Processing**: Keep signature as-is for facilitator
+
+### EIP-1271 (Deployed Smart Contracts)
+
+- **Length**: 174 characters (including 0x prefix)
+- **Use Case**: Deployed smart contract wallets
+- **Processing**: Keep signature as-is
+
+### Standard ECDSA
+
+- **Length**: 132 characters (including 0x prefix)
+- **Format**: 65 bytes (r: 32 bytes, s: 32 bytes, v: 1 byte)
+- **Use Case**: EOA wallets and some deployed contracts
+- **Processing**: Keep signature as-is
+
+## Best Practices
+
+### Always Check Deployment Status
+
+Before making x402 payments, verify wallet deployment:
+
+```typescript
+const isDeployed = await checkWalletDeployment(wallet.address, "base-sepolia");
+
+if (!isDeployed) {
+  await deployWallet(wallet);
+}
+```
+
+### Handle Signature Errors Gracefully
+
+```typescript
+try {
+  const signature = await account.signTypedData(params);
+} catch (error) {
+  console.error("Signature error:", error);
+  throw new Error(`Failed to sign payment: ${error instanceof Error ? error.message : String(error)}`);
+}
+```
+
+### Log Payment Details
+
+For debugging, log EIP-712 payload details:
+
+```typescript
+console.log("Signing payment:", {
+  from: evm.address,
+  to: message.to,
+  amount: message.maxAmount,
+  verifyingContract: domain.verifyingContract
+});
+```
+
+## Type Definitions
+
+```typescript
+import type { Wallet } from "@crossmint/wallets-sdk";
+import type { Hex } from "viem";
+
+interface X402Account {
+  address: `0x${string}`;
+  type: "local";
+  source: "custom";
+  signTypedData: (params: {
+    domain: any;
+    message: any;
+    primaryType: string;
+    types: any;
+  }) => Promise<Hex>;
+}
+
+function createX402Signer(wallet: Wallet<any>): X402Account;
+
+function checkWalletDeployment(
+  walletAddress: string,
+  chain: string
+): Promise<boolean>;
+
+function deployWallet(wallet: Wallet<any>): Promise<string>;
+```
+
+## Troubleshooting
+
+### Signature Verification Fails
+
+**Problem**: x402 facilitator rejects signature
+
+**Solution**: Ensure wallet is deployed before settlement
+
+```typescript
+if (!await checkWalletDeployment(wallet.address, "base-sepolia")) {
+  await deployWallet(wallet);
+}
+```
+
+### Insufficient Gas
+
+**Problem**: Wallet deployment fails with "insufficient balance"
+
+**Solution**: Fund wallet with ETH for gas fees
+
+```typescript
+// Fund wallet before deployment
+await fundWallet(wallet.address, "0.01"); // 0.01 ETH
+await deployWallet(wallet);
+```
+
+### Invalid Signature Length
+
+**Problem**: Signature has unexpected length
+
+**Solution**: processSignature handles this automatically by extracting standard signature
+
+```typescript
+// Automatically handles non-standard lengths
+if (signature.length > 132) {
+  const extracted = '0x' + signature.slice(-130);
+  return extracted as Hex;
+}
+```
+
+## See Also
+
+- [@crossmint/wallets-sdk](/api/crossmint-wallets) - Crossmint wallet creation and management
+- [x402 Protocol](https://x402.org) - Payment protocol specification
+- [ERC-6492](https://eips.ethereum.org/EIPS/eip-6492) - Signature validation for pre-deployed contracts
+- [EIP-1271](https://eips.ethereum.org/EIPS/eip-1271) - Smart contract signature validation

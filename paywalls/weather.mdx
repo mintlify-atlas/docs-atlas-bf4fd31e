@@ -1,0 +1,462 @@
+---
+title: 'Weather Demo'
+description: 'HTTP 402 paywall protecting a real-world API with dynamic data'
+---
+
+# Weather Demo
+
+The Weather demo shows how to protect a practical API endpoint that returns dynamic data. It demonstrates protecting an endpoint with query parameters while integrating with a third-party API (Open-Meteo).
+
+## Overview
+
+This demo creates an Express server with a weather API endpoint that requires payment to access. The endpoint fetches real weather data for any city from the Open-Meteo API (no API key required) and returns temperature information.
+
+**Key Features:**
+- Protects dynamic endpoint with query parameters
+- Integrates with external weather API (Open-Meteo)
+- Price: $0.001 USDC on `base-sepolia`
+- Returns current temperature for requested city
+- Demonstrates real-world API monetization pattern
+
+## Setup
+
+### Installation
+
+```bash
+cd weather
+# Create .env with your receiver address
+cat > .env <<'EOF'
+PAY_TO=0x0000000000000000000000000000000000000000
+PORT=3100
+TARGET_URL=http://localhost:3100/weather?city=San%20Francisco
+# PRIVATE_KEY: used by header generator script
+PRIVATE_KEY=
+EOF
+
+npm install
+npm run dev
+```
+
+### Environment Variables
+
+```bash .env
+PAY_TO=0x0000000000000000000000000000000000000000
+PORT=3100
+TARGET_URL=http://localhost:3100/weather?city=San%20Francisco
+PRIVATE_KEY=
+```
+
+**Configuration:**
+- `PAY_TO` - Your EVM wallet address to receive payments
+- `PORT` - Server port (default: 3100)
+- `TARGET_URL` - Full URL including query parameters for testing
+- `PRIVATE_KEY` - Private key for payment header generation
+
+## Server Implementation
+
+The server uses x402 middleware and integrates with Open-Meteo API:
+
+```typescript src/server.ts
+import express, { Request, Response } from "express";
+import type { Address } from "viem";
+import axios from "axios";
+import { paymentMiddleware } from "x402-express";
+import * as dotenv from "dotenv";
+
+dotenv.config();
+
+const app = express();
+const port = process.env.PORT ? Number(process.env.PORT) : 3100;
+const payTo = (process.env.PAY_TO || "0x0000000000000000000000000000000000000000") as Address;
+
+// Apply payment middleware to weather endpoint
+app.use(paymentMiddleware(payTo, {
+  "GET /weather": { price: "$0.001", network: "base-sepolia" }
+}));
+
+// Protected weather endpoint
+app.get("/weather", async (req: Request, res: Response) => {
+  const city = (req.query.city as string) || "San Francisco";
+  
+  try {
+    // Geocode city name to lat/lon using Open-Meteo's free geocoding API
+    const geo = await axios.get(
+      `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(city)}&count=1`
+    );
+    
+    const first = geo.data?.results?.[0];
+    if (!first) {
+      return res.status(404).json({ error: "City not found" });
+    }
+    
+    const { latitude, longitude, name, country } = first;
+
+    // Fetch current temperature
+    const m = await axios.get(
+      `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current=temperature_2m`
+    );
+
+    const data = {
+      city: name || city,
+      country,
+      latitude,
+      longitude,
+      temperatureC: m.data?.current?.temperature_2m
+    };
+
+    res.json({ weather: data });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || "Unknown error" });
+  }
+});
+
+app.listen(port, () => {
+  console.log(`weather-402 server listening on http://localhost:${port}`);
+});
+```
+
+## Usage
+
+### Access the Endpoint
+
+Open the weather endpoint with a city query parameter:
+
+```bash
+http://localhost:3100/weather?city=San%20Francisco
+```
+
+Without payment, you'll receive HTTP 402 with payment requirements.
+
+### Request Without Payment (JSON)
+
+```bash
+curl -i -H "Accept: application/json" "http://localhost:3100/weather?city=Paris"
+```
+
+**Response (HTTP 402):**
+```json
+{
+  "accepts": [{
+    "payTo": "0xYourAddress",
+    "network": "base-sepolia",
+    "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+    "maxAmountRequired": "1000",
+    "extra": {
+      "name": "USDC",
+      "symbol": "USDC",
+      "decimals": 6
+    }
+  }],
+  "version": "2"
+}
+```
+
+### Request With Payment
+
+```bash
+curl -i -H 'X-PAYMENT: <BASE64_XPAYMENT>' "http://localhost:3100/weather?city=Paris"
+```
+
+**Success Response (HTTP 200):**
+```json
+{
+  "weather": {
+    "city": "Paris",
+    "country": "France",
+    "latitude": 48.8566,
+    "longitude": 2.3522,
+    "temperatureC": 18.5
+  }
+}
+```
+
+### Request With Paywall HTML
+
+```bash
+curl -i "http://localhost:3100/weather?city=Paris"
+```
+
+Returns HTML paywall page that users see in browsers.
+
+## Generating Payment Headers
+
+### Configure Credentials
+
+```bash
+# Set PRIVATE_KEY to the payer EVM private key (Base Sepolia)
+# Set TARGET_URL with your desired city
+TARGET_URL="http://localhost:3100/weather?city=Tokyo"
+```
+
+### Generate Header
+
+```bash
+npm run payment:header
+# Outputs Base64 encoded payment header
+```
+
+### Use With curl
+
+```bash
+HEADER=$(npm run -s payment:header)
+curl -i -H "X-PAYMENT: $HEADER" "$TARGET_URL"
+```
+
+**Process:**
+1. Fetches `/weather` endpoint to read payment requirements
+2. Signs `exact` EVM payment with specified amount
+3. Encodes payment data as Base64 X-PAYMENT header
+4. Works by default for `base-sepolia` network
+
+## Query Parameters
+
+### City Parameter
+
+The `city` query parameter accepts any city name:
+
+```bash
+# Major cities
+curl "http://localhost:3100/weather?city=London"
+curl "http://localhost:3100/weather?city=New York"
+curl "http://localhost:3100/weather?city=Tokyo"
+
+# International cities with spaces
+curl "http://localhost:3100/weather?city=San%20Francisco"
+curl "http://localhost:3100/weather?city=Los%20Angeles"
+
+# Default city (if omitted)
+curl "http://localhost:3100/weather"
+# Returns weather for San Francisco
+```
+
+### Error Handling
+
+If city is not found:
+
+```bash
+curl -H "X-PAYMENT: $HEADER" "http://localhost:3100/weather?city=InvalidCity123"
+```
+
+**Response (HTTP 404):**
+```json
+{
+  "error": "City not found"
+}
+```
+
+## Testing
+
+### Pretty-Print Response
+
+```bash
+curl -s -H "Accept: application/json" "http://localhost:3100/weather?city=Paris" | jq .
+```
+
+### Test Multiple Cities
+
+```bash
+for city in "Paris" "London" "Tokyo" "Sydney"; do
+  echo "Testing $city:"
+  HEADER=$(npm run -s payment:header)
+  curl -s -H "X-PAYMENT: $HEADER" "http://localhost:3100/weather?city=$city" | jq .
+done
+```
+
+Note: Generate a new header for each request due to nonce uniqueness.
+
+### Test Error Cases
+
+```bash
+# Test without payment
+curl -i "http://localhost:3100/weather?city=Paris"
+
+# Test invalid city
+HEADER=$(npm run -s payment:header)
+curl -i -H "X-PAYMENT: $HEADER" "http://localhost:3100/weather?city=NotARealCity999"
+
+# Test missing Accept header
+curl -i "http://localhost:3100/weather?city=Paris"
+```
+
+## Weather API Integration
+
+This demo uses **Open-Meteo**, a free weather API:
+
+### Geocoding API
+
+Converts city names to coordinates:
+
+```
+GET https://geocoding-api.open-meteo.com/v1/search?name={city}&count=1
+```
+
+**Response:**
+```json
+{
+  "results": [{
+    "name": "Paris",
+    "latitude": 48.8566,
+    "longitude": 2.3522,
+    "country": "France"
+  }]
+}
+```
+
+### Weather API
+
+Fetches current temperature:
+
+```
+GET https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m
+```
+
+**Response:**
+```json
+{
+  "current": {
+    "temperature_2m": 18.5
+  }
+}
+```
+
+### Why Open-Meteo?
+
+- No API key required
+- Free for development and testing
+- Reliable global coverage
+- Simple REST API
+- Current weather + forecasts available
+
+## Payment Flow
+
+<Steps>
+  <Step title="Client Requests Weather">
+    Client makes GET request to `/weather?city=Paris` without payment
+  </Step>
+  <Step title="Server Returns 402">
+    Payment middleware intercepts request and returns 402 with payment details
+  </Step>
+  <Step title="Client Creates Payment">
+    Client signs payment authorization for $0.001 USDC
+  </Step>
+  <Step title="Client Retries with Payment">
+    Client includes X-PAYMENT header in retry request
+  </Step>
+  <Step title="Server Verifies Payment">
+    Middleware verifies signature and amount
+  </Step>
+  <Step title="Endpoint Handler Executes">
+    Weather data is fetched from Open-Meteo and returned
+  </Step>
+</Steps>
+
+## Network Configuration
+
+**Base Sepolia Testnet:**
+- Network: `base-sepolia`
+- USDC Contract: `0x036CbD53842c5426634e7929541eC2318f3dCF7e`
+- Price: $0.001 USDC (1000 base units)
+
+### Get Testnet Tokens
+
+**Base Sepolia ETH:**
+- https://www.alchemy.com/faucets/base-sepolia
+
+**Base Sepolia USDC:**
+- https://faucet.circle.com/ (select Base Sepolia)
+
+## Use Cases
+
+This pattern is perfect for:
+
+### API Monetization
+- Charge per API call
+- Micro-transactions for data access
+- Usage-based pricing
+
+### Data Services
+- Weather data
+- Financial market data
+- Geographic information
+- Sports scores and statistics
+
+### Content APIs
+- Article access
+- Image generation
+- Translation services
+- Data enrichment
+
+## Key Differences from Ping Demo
+
+| Feature | Ping Demo | Weather Demo |
+|---------|-----------|-------------|
+| Endpoint | Static `/ping` | Dynamic `/weather?city=...` |
+| Response | Fixed JSON | Dynamic API data |
+| External API | None | Open-Meteo integration |
+| Error Handling | Basic | City not found, API errors |
+| Complexity | Minimal | Real-world pattern |
+
+## Dependencies
+
+```json package.json
+{
+  "dependencies": {
+    "express": "^5.1.0",
+    "x402-express": "^0.6.1",
+    "x402": "^0.6.1",
+    "viem": "^2.37.6",
+    "axios": "^1.12.2",
+    "dotenv": "^17.2.2"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/node": "^22.7.4",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Ping Crossmint" icon="wallet" href="/paywalls/ping-crossmint">
+    Add smart wallet integration with React UI
+  </Card>
+  <Card title="Ping Demo" icon="circle-dot" href="/paywalls/ping">
+    Start with the basic implementation
+  </Card>
+  <Card title="Solana Demo" icon="bolt" href="/paywalls/solana">
+    Implement paywalls on Solana
+  </Card>
+  <Card title="x402 Express" icon="book" href="https://github.com/coinbase/x402">
+    Explore the middleware documentation
+  </Card>
+</CardGroup>
+
+## Troubleshooting
+
+### Open-Meteo API Errors
+
+**Error:** City not found
+
+**Solution:** Verify city name spelling. Try major cities first. Use URL encoding for spaces.
+
+### Port Already in Use
+
+**Error:** `Error: listen EADDRINUSE ::1:3100`
+
+**Solution:**
+```bash
+PORT=3200 npm run dev
+```
+
+### Payment Verification Fails
+
+**Error:** Still getting 402 with payment header
+
+**Solutions:**
+- Generate fresh payment header (nonces are single-use)
+- Verify TARGET_URL matches exact endpoint and query params
+- Check payer wallet has USDC balance on base-sepolia
+- Ensure network parameter is "base-sepolia" in both client and server
