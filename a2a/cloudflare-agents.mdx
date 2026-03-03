@@ -15,7 +15,7 @@ The Cloudflare Agents x402 demo showcases **wallet-to-wallet autonomous payments
 
 ## What This Demo Does
 
-```
+```text
 User → PayAgent (Wallet A) → Protected API (Wallet B)
                            ↓ (402 Payment Required)
                            ↓ Agent pays $0.10 automatically
@@ -68,7 +68,7 @@ npm run dev
 ```
 
 You should see:
-```
+```text
 💼 Server wallet created: 0xABC...
 💰 Will receive payments at Crossmint smart wallet
 ⎔ Ready on http://localhost:8787
@@ -191,6 +191,34 @@ This pattern enables:
 
 ## Architecture
 
+```text
+┌─────────────┐
+│   Client    │
+│   (Agent)   │
+│  + Wallet   │
+└──────┬──────┘
+       │
+       │ GET /protected-route
+       ▼
+┌─────────────────────┐
+│  Payment Middleware │
+│   (x402-hono)       │
+└──────┬──────────────┘
+       │
+       │ 402 Payment Required
+       │ + payment instructions
+       ▼
+┌─────────────┐         ┌──────────────────┐
+│   Client    │────────▶│    Facilitator   │
+│   Pays      │         │  (x402.org)      │
+└─────────────┘         └────────┬─────────┘
+       │                         │
+       │                         │ Verify
+       │ GET + payment proof     │
+       ▼                         ▼
+┌─────────────────────┐
+│  Protected Content  │
+└─────────────────────┘
 ```
 ┌─────────────┐
 │   Client    │
@@ -220,7 +248,7 @@ This pattern enables:
 │  Protected Content  │
 │      Returned       │
 └─────────────────────┘
-```
+```text
 
 ## Payment Flow Sequence
 
@@ -243,7 +271,7 @@ sequenceDiagram
     Server->>Facilitator: Verify payment
     Facilitator-->>Server: Payment verified
     Server-->>Client: Protected content
-```
+```text
 
 ## Deploying to Production
 
@@ -252,7 +280,7 @@ sequenceDiagram
 ```bash
 npx wrangler secret put CROSSMINT_API_KEY
 # Paste your API key when prompted
-```
+```text
 
 ### Step 2: Update to Mainnet
 
@@ -266,19 +294,19 @@ network: "base-sepolia",
 // To:
 chain: "base",
 network: "base",
-```
+```text
 
 ### Step 3: Deploy
 
 ```bash
 npm run deploy
-```
+```text
 
 ### Step 4: Test Live
 
 ```bash
 curl https://crossmint-x402.your-subdomain.workers.dev/agent
-```
+```text
 
 ## Troubleshooting
 
@@ -334,7 +362,7 @@ export function createX402Signer(wallet: CrossmintWallet): Account {
     }
   };
 }
-```
+```text
 
 ## Learn More
 
